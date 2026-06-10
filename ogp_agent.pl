@@ -39,6 +39,7 @@ use LWP::UserAgent; # Used for fetching URLs
 use MIME::Base64;	# Used to ensure data travelling right through the network.
 use Getopt::Long;	# Used for command line params.
 use Path::Class::File;	# Used to handle files and directories.
+use File::Glob qw(bsd_glob GLOB_NOSORT);
 use File::Path qw(mkpath);
 use Archive::Extract;	 # Used to handle archived files.
 use File::Find;
@@ -1503,6 +1504,43 @@ sub quick_chk
 	return 0;
 }
 
+sub log_path_has_wildcards
+{
+	my ($path) = @_;
+	return defined($path) && $path =~ /[*?\[]/ ? 1 : 0;
+}
+
+sub resolve_latest_log_match
+{
+	my ($home_path, $pattern) = @_;
+	return undef if !defined($home_path) || !defined($pattern) || $pattern eq "";
+
+	$pattern =~ s{\\}{/}g;
+	$pattern =~ s{^\./+}{};
+	return undef if $pattern =~ /\0/;
+	return undef if $pattern =~ m{^/};
+	return undef if $pattern =~ m{(^|/)\.\.(?:/|$)};
+
+	my $home_abs = Cwd::abs_path($home_path);
+	return undef unless defined($home_abs);
+
+	my @matches = bsd_glob("$home_path/$pattern", GLOB_NOSORT);
+	my @candidates = ();
+	foreach my $candidate (@matches)
+	{
+		next unless -f $candidate;
+		my $candidate_abs = Cwd::abs_path($candidate);
+		next unless defined($candidate_abs);
+		next unless $candidate_abs eq $home_abs || index($candidate_abs, "$home_abs/") == 0;
+		my $mtime = (stat($candidate_abs))[9] || 0;
+		push(@candidates, [ $candidate_abs, $mtime ]);
+	}
+
+	return undef unless scalar(@candidates) > 0;
+	@candidates = sort { $b->[1] <=> $a->[1] || $b->[0] cmp $a->[0] } @candidates;
+	return $candidates[0]->[0];
+}
+
 ### Return -10 If home path is not found.
 ### Return -9  If log type was invalid.
 ### Return -8  If log file was not found.
@@ -1513,6 +1551,7 @@ sub get_log
 {
 	return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
 	my ($screen_type, $home_id, $home_path, $nb_of_lines, $log_file) = decrypt_params(@_);
+	my $log_request_wildcard = 0;
 
 	if (!chdir $home_path)
 	{
@@ -1534,7 +1573,21 @@ sub get_log
 	}
 	else
 	{
-		$log_file = Path::Class::File->new($home_path, $log_file);
+		if (log_path_has_wildcards($log_file))
+		{
+			$log_request_wildcard = 1;
+			my $resolved_log_file = resolve_latest_log_match($home_path, $log_file);
+			if (!defined($resolved_log_file))
+			{
+				logger "No log files matched wildcard pattern '$log_file' in '$home_path'.";
+				return -8;
+			}
+			$log_file = Path::Class::File->new($resolved_log_file);
+		}
+		else
+		{
+			$log_file = Path::Class::File->new($home_path, $log_file);
+		}
 	}
 
 	sudo_exec_without_decrypt("chmod 777 \"$log_file\"");
@@ -1557,6 +1610,12 @@ sub get_log
 	# Regenerate the log file if it doesn't exist
 	unless ( -e $log_file )
 	{
+		if ($log_request_wildcard)
+		{
+			logger "Wildcard log file does not resolve to an existing file: " . $log_file;
+			return -8;
+		}
+
 		if (open(NEWLOG, '>', $log_file))
 		{
 			logger "Log file missing, regenerating: " . $log_file;
