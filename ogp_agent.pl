@@ -87,6 +87,8 @@ use constant SCREEN_LOGS_DIR =>
   Path::Class::Dir->new(AGENT_RUN_DIR, 'screenlogs');
 use constant GAME_STARTUP_DIR =>
   Path::Class::Dir->new(AGENT_RUN_DIR, 'startups');
+use constant SERVER_RUNTIME_DIR =>
+	Path::Class::Dir->new(AGENT_RUN_DIR, 'runtime_status');
 use constant SCREENRC_FILE =>
   Path::Class::File->new(AGENT_RUN_DIR, 'ogp_screenrc');
 use constant SCREENRC_FILE_BK =>
@@ -239,6 +241,13 @@ if (!-e GAME_STARTUP_DIR)
 		exit 1;
 	}
 }
+
+if (!-d SERVER_RUNTIME_DIR && !mkdir SERVER_RUNTIME_DIR)
+{
+	logger "Could not create " . SERVER_RUNTIME_DIR . " directory $!.", 1;
+	exit -1;
+}
+
 elsif ($clear_startups)
 {
 	opendir(STARTUPDIR, GAME_STARTUP_DIR);
@@ -878,6 +887,126 @@ sub read_status_hint
 	return ($timestamp, $state);
 }
 
+sub get_pid_metadata_path
+{
+	my ($home_id) = @_;
+	$home_id =~ s/[^0-9]//g;
+	return Path::Class::File->new(SERVER_RUNTIME_DIR, "pid-$home_id.kv");
+}
+
+sub write_pid_metadata
+{
+	my ($home_id, $values) = @_;
+	return 0 unless(ref($values) eq 'HASH');
+	my $file = get_pid_metadata_path($home_id);
+	if(open(PIDMETA, '>', $file))
+	{
+		foreach my $key (sort keys %$values)
+		{
+			my $value = defined($values->{$key}) ? $values->{$key} : "";
+			$value =~ s/[\r\n]//g;
+			print PIDMETA "$key=$value\n";
+		}
+		close(PIDMETA);
+		return 1;
+	}
+	return 0;
+}
+
+sub read_pid_metadata
+{
+	my ($home_id) = @_;
+	my %values;
+	my $file = get_pid_metadata_path($home_id);
+	return \%values unless(-e $file);
+	if(open(PIDMETA, '<', $file))
+	{
+		while(my $line = <PIDMETA>)
+		{
+			chomp($line);
+			next unless($line =~ /^([^=]+)=(.*)$/);
+			$values{$1} = $2;
+		}
+		close(PIDMETA);
+	}
+	return \%values;
+}
+
+sub clear_pid_metadata
+{
+	my ($home_id) = @_;
+	my $file = get_pid_metadata_path($home_id);
+	unlink($file) if(-e $file);
+}
+
+sub is_pid_alive_without_decrypt
+{
+	my ($pid) = @_;
+	return 0 unless(defined($pid) && $pid =~ /^\d+$/ && $pid > 0);
+	return kill(0, $pid) ? 1 : 0;
+}
+
+sub kill_pid_with_escalation_without_decrypt
+{
+	my ($pid, $as_user) = @_;
+	return 0 unless(defined($pid) && $pid =~ /^\d+$/);
+	my $cnt = sudo_exec_without_decrypt("kill 15 $pid", $as_user);
+	($cnt) = split(/;/, $cnt, 2);
+	if ($cnt == -1)
+	{
+		$cnt = sudo_exec_without_decrypt("kill 9 $pid", $as_user);
+		($cnt) = split(/;/, $cnt, 2);
+	}
+	return $cnt == -1 ? 0 : 1;
+}
+
+sub find_process_pid_by_port_without_decrypt
+{
+	my ($port, $protocol) = @_;
+	return "" unless(defined($port) && $port =~ /^\d+$/ && $port > 0 && $port <= 65535);
+	$protocol = "any" unless(defined($protocol) && $protocol =~ /^(tcp|udp|any)$/i);
+	$protocol = lc($protocol);
+	my @commands = ();
+	if($protocol eq "tcp" || $protocol eq "any")
+	{
+		push(@commands, "lsof -nP -t -iTCP:$port -sTCP:LISTEN 2>/dev/null | head -1");
+		push(@commands, "ss -lntp '( sport = :$port )' 2>/dev/null | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | head -1");
+	}
+	if($protocol eq "udp" || $protocol eq "any")
+	{
+		push(@commands, "lsof -nP -t -iUDP:$port 2>/dev/null | head -1");
+		push(@commands, "ss -lnup '( sport = :$port )' 2>/dev/null | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | head -1");
+	}
+	foreach my $command (@commands)
+	{
+		my $pid = `$command`;
+		chomp($pid);
+		return $pid if($pid =~ /^\d+$/);
+	}
+	return "";
+}
+
+sub force_kill_tracked_and_port_without_decrypt
+{
+	my ($home_id, $server_port, $as_user) = @_;
+	my $pid_meta = read_pid_metadata($home_id);
+	my @tracked_pids = ();
+	push(@tracked_pids, $pid_meta->{game_pid}) if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/);
+	push(@tracked_pids, $pid_meta->{screen_pid}) if(defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/);
+	my %seen;
+	foreach my $pid (@tracked_pids)
+	{
+		next if($seen{$pid});
+		$seen{$pid} = 1;
+		kill_pid_with_escalation_without_decrypt($pid, $as_user);
+	}
+	my $port_pid = find_process_pid_by_port_without_decrypt($server_port, "any");
+	if($port_pid =~ /^\d+$/)
+	{
+		kill_pid_with_escalation_without_decrypt($port_pid, $as_user);
+	}
+}
+
 sub get_screen_pid_without_decrypt
 {
 	my ($home_id) = @_;
@@ -921,8 +1050,13 @@ sub server_status_without_decrypt
 
 	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
 	my $session_running = is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1 ? 1 : 0;
-	my $pid = $session_running ? get_screen_pid_without_decrypt($home_id) : "";
-	my $process_running = $session_running;
+	my $screen_pid = $session_running ? get_screen_pid_without_decrypt($home_id) : "";
+	my $pid_meta = read_pid_metadata($home_id);
+	my $game_pid = defined($pid_meta->{game_pid}) ? $pid_meta->{game_pid} : "";
+	my $pid_running = 0;
+	$pid_running = 1 if($screen_pid ne "" && is_pid_alive_without_decrypt($screen_pid) == 1);
+	$pid_running = 1 if(!$pid_running && $game_pid ne "" && is_pid_alive_without_decrypt($game_pid) == 1);
+	my $process_running = ($session_running || $pid_running) ? 1 : 0;
 	my $game_port_listening = is_port_listening_without_decrypt($server_ip, $server_port);
 	my $query_port_listening = $query_port ne "" ? is_port_listening_without_decrypt($server_ip, $query_port) : 0;
 	my $rcon_port_listening = $rcon_port ne "" ? is_port_listening_without_decrypt($server_ip, $rcon_port) : 0;
@@ -932,12 +1066,12 @@ sub server_status_without_decrypt
 	my $status = "UNKNOWN";
 	my $ready = 0;
 
-	if($session_running && $game_port_listening)
+	if($process_running && $game_port_listening)
 	{
 		$status = "ONLINE";
 		$ready = 1;
 	}
-	elsif($session_running)
+	elsif($process_running)
 	{
 		if($effective_hint eq "STOPPING")
 		{
@@ -962,17 +1096,27 @@ sub server_status_without_decrypt
 	else
 	{
 		$status = "OFFLINE";
+		clear_pid_metadata($home_id);
 	}
 
 	return {
 		status => $status,
+		StatusState => $status eq "ONLINE" ? "Running" : ($status eq "OFFLINE" ? "Stopped" : ($status eq "UNRESPONSIVE" ? "Failed" : "Starting")),
+		status_state => $status eq "ONLINE" ? "Running" : ($status eq "OFFLINE" ? "Stopped" : ($status eq "UNRESPONSIVE" ? "Failed" : "Starting")),
 		ready => $ready,
+		ProcessRunning => $process_running,
 		process_running => $process_running,
 		session_running => $session_running,
+		pid_running => $pid_running,
 		game_port_listening => $game_port_listening ? 1 : 0,
 		query_port_listening => $query_port_listening ? 1 : 0,
 		rcon_port_listening => $rcon_port_listening ? 1 : 0,
-		pid => $pid,
+		ExpectedPorts => [ { name => "game", port => int($server_port), protocol => "any" } ],
+		ListeningPorts => $game_port_listening ? [ { name => "game", port => int($server_port), protocol => "any" } ] : [],
+		MissingPorts => $game_port_listening ? [] : [ { name => "game", port => int($server_port), protocol => "any" } ],
+		pid => $game_pid ne "" ? $game_pid : $screen_pid,
+		screen_pid => $screen_pid,
+		windows_pid => "",
 		session_name => $screen_id,
 		ip => $server_ip,
 		port => $server_port,
@@ -1216,6 +1360,15 @@ sub universal_start_without_decrypt
 	write_status_hint($home_id, "STARTING");
 
 	sleep(1);
+	my @started_pids = get_home_pids($home_id);
+	my $game_pid = @started_pids > 0 ? $started_pids[0] : "";
+	my $screen_pid = get_screen_pid_without_decrypt($home_id);
+	write_pid_metadata($home_id, {
+		screen_pid => $screen_pid,
+		game_pid => $game_pid,
+		ip => $server_ip,
+		port => $server_port
+	});
 
 	renice_process_without_decrypt($home_id, $nice);
 
@@ -1627,6 +1780,7 @@ sub stop_server_without_decrypt
 			if (is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 0)
 			{
 				logger "Stopped server $server_ip:$server_port with rcon quit.";
+				force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
 				return verify_server_stopped_without_decrypt($home_id, $server_ip, $server_port);
 			}
 		else
@@ -1662,6 +1816,7 @@ sub stop_server_without_decrypt
 			}
 		}
 			sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
+			force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
 			return verify_server_stopped_without_decrypt($home_id, $server_ip, $server_port);
 		}
 	else
@@ -1695,6 +1850,7 @@ sub stop_server_without_decrypt
 			}
 		}
 			sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
+			force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
 			return verify_server_stopped_without_decrypt($home_id, $server_ip, $server_port);
 		}
 	}
@@ -1702,11 +1858,19 @@ sub stop_server_without_decrypt
 sub verify_server_stopped_without_decrypt
 {
 	my ($home_id, $server_ip, $server_port) = @_;
+	my $pid_meta = read_pid_metadata($home_id);
 	for(my $i = 0; $i < 30; $i++)
 	{
 		my $session_running = is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1 ? 1 : 0;
+		my $pid_running = 0;
+		$pid_running = 1 if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{game_pid}) == 1);
+		$pid_running = 1 if(!$pid_running && defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{screen_pid}) == 1);
 		my $port_listening = is_port_listening_without_decrypt($server_ip, $server_port);
-		return 0 if(!$session_running && !$port_listening);
+		if(!$session_running && !$pid_running && !$port_listening)
+		{
+			clear_pid_metadata($home_id);
+			return 0;
+		}
 		sleep 2;
 	}
 	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
@@ -1714,13 +1878,18 @@ sub verify_server_stopped_without_decrypt
 	sudo_exec_without_decrypt('screen -S '.$screen_id.' -X quit', $as_user);
 	sleep 2;
 	sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
+	force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
 	my $session_running = is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1 ? 1 : 0;
+	my $pid_running = 0;
+	$pid_running = 1 if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{game_pid}) == 1);
+	$pid_running = 1 if(!$pid_running && defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{screen_pid}) == 1);
 	my $port_listening = is_port_listening_without_decrypt($server_ip, $server_port);
-	if($session_running || $port_listening)
+	if($session_running || $pid_running || $port_listening)
 	{
 		logger "Server $server_ip:$server_port is still running or listening after stop escalation.";
 		return 1;
 	}
+	clear_pid_metadata($home_id);
 	return 0;
 }
 
@@ -3866,6 +4035,11 @@ sub restart_server_without_decrypt
 	{
 		logger "Waiting 60 seconds before starting the server again.";
 		sleep 60;
+		if (verify_server_stopped_without_decrypt($home_id, $server_ip, $server_port) != 0)
+		{
+			logger "Restart cancelled: previous instance is still active after stop wait window.";
+			return -2;
+		}
 		if (universal_start_without_decrypt($home_id, $home_path, $server_exe, $run_dir,
 											$cmd, $server_port, $server_ip, $cpu, $nice, $preStart, $envVars, $game_key, $console_log) == 1)
 		{

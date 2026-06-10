@@ -66,6 +66,22 @@ Logs live next to the binaries (`/opt/gsp-agent/ogp_agent.log`). Individual game
 - `screen -ls` – confirm customer servers are running in screen sessions.
 - `nc -vz panel.example.com 12679` from the panel host – ensures the agent port is reachable.
 
+## Server lifecycle tracking
+
+The Linux agent now keeps per-home PID metadata under:
+
+- `runtime_status/pid-<home_id>.kv`
+
+This metadata is used by stop/restart verification in addition to screen and port checks.
+
+Stop escalation now verifies all of the following are cleared before success:
+
+1. managed screen session
+2. tracked process PID(s)
+3. listening game port
+
+Restart remains stop-first and waits 60 seconds, then re-verifies stop completion before starting again to avoid duplicate instances.
+
 ## Related docs
 
 - [`GSP/documentation/admin-guide.md`](https://github.com/GameServerPanel/GSP/tree/main/documentation) – Panel-side instructions plus XML authoring notes.
