@@ -597,7 +597,7 @@ sub create_screen_cmd
 
 sub create_screen_cmd_loop
 {
-	my ($screen_id, $exec_cmd, $envVars, $skipLoop) = @_;
+	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file) = @_;
 	my $server_start_bashfile = $screen_id . "_startup_scr.sh";
 
 	$exec_cmd = replace_OGP_Env_Vars($screen_id, "", "", $exec_cmd);
@@ -622,6 +622,7 @@ sub create_screen_cmd_loop
 	}
 
 	if(!$skipLoop){
+		$status_hint_file = "" unless(defined($status_hint_file));
 		$respawn_server_command .= "NUMSECONDS=`expr \$(date +%s)`" . "\n"
 		. "until " . $exec_cmd . "; do" . "\n"
 		. "let DIFF=(`date +%s` - \"\$NUMSECONDS\")" . "\n"
@@ -632,8 +633,10 @@ sub create_screen_cmd_loop
 		. "sleep 3" . "\n"
 		. "done" . "\n"
 		. "let DIFF=(`date +%s` - \"\$NUMSECONDS\")" . "\n"
-
-		. "if [ ! -e \"SERVER_STOPPED\" ] && [ \"\$DIFF\" -gt 15 ]; then" . "\n"
+		. "if [ -f \"$status_hint_file\" ] && grep -E \"^[0-9]+,(STOPPING|STOPPED)$\" \"$status_hint_file\" >/dev/null 2>&1; then" . "\n"
+		. "exit 0" . "\n"
+		. "fi" . "\n"
+		. "if [ \"\$DIFF\" -gt 15 ]; then" . "\n"
 		. "startServer" . "\n"
 		. "fi" . "\n"
 		. "}" . "\n"
@@ -1024,14 +1027,23 @@ sub get_screen_pid_without_decrypt
 
 sub is_port_listening_without_decrypt
 {
-	my ($server_ip, $port) = @_;
+	my ($server_ip, $port, $protocol) = @_;
 	return 0 unless(defined($port) && $port =~ /^[0-9]+$/ && $port > 0 && $port <= 65535);
-	my @commands = (
-		"ss -lntu 2>/dev/null",
-		"netstat -lntu 2>/dev/null",
-		"lsof -nP -iTCP:$port -sTCP:LISTEN 2>/dev/null",
-		"lsof -nP -iUDP:$port 2>/dev/null"
-	);
+	$protocol = "any" unless(defined($protocol) && $protocol =~ /^(tcp|udp|any)$/i);
+	$protocol = lc($protocol);
+	my @commands = ();
+	if($protocol eq "tcp" || $protocol eq "any")
+	{
+		push(@commands, "ss -lnt 2>/dev/null");
+		push(@commands, "netstat -lnt 2>/dev/null");
+		push(@commands, "lsof -nP -iTCP:$port -sTCP:LISTEN 2>/dev/null");
+	}
+	if($protocol eq "udp" || $protocol eq "any")
+	{
+		push(@commands, "ss -lnu 2>/dev/null");
+		push(@commands, "netstat -lnu 2>/dev/null");
+		push(@commands, "lsof -nP -iUDP:$port 2>/dev/null");
+	}
 	foreach my $command (@commands)
 	{
 		my $out = `$command`;
@@ -1045,8 +1057,8 @@ sub server_status_without_decrypt
 {
 	my ($home_id, $server_ip, $server_port, $query_port, $rcon_port, $startup_timeout, $state_hint) = @_;
 	$startup_timeout = 180 unless(defined($startup_timeout) && $startup_timeout =~ /^[0-9]+$/ && $startup_timeout > 0);
-	$query_port = "" unless(defined($query_port) && $query_port =~ /^[0-9]+$/);
-	$rcon_port = "" unless(defined($rcon_port) && $rcon_port =~ /^[0-9]+$/);
+	$query_port = "" unless(defined($query_port) && $query_port =~ /^[0-9,;:\s\/a-zA-Z]+$/);
+	$rcon_port = "" unless(defined($rcon_port) && $rcon_port =~ /^[0-9,;:\s\/a-zA-Z]+$/);
 	$state_hint = "" unless(defined($state_hint));
 
 	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
@@ -1054,56 +1066,113 @@ sub server_status_without_decrypt
 	my $screen_pid = $session_running ? get_screen_pid_without_decrypt($home_id) : "";
 	my $pid_meta = read_pid_metadata($home_id);
 	my $game_pid = defined($pid_meta->{game_pid}) ? $pid_meta->{game_pid} : "";
+	my $linux_pid = $game_pid;
 	my $pid_running = 0;
 	$pid_running = 1 if($screen_pid ne "" && is_pid_alive_without_decrypt($screen_pid) == 1);
 	$pid_running = 1 if(!$pid_running && $game_pid ne "" && is_pid_alive_without_decrypt($game_pid) == 1);
 	my $process_running = ($session_running || $pid_running) ? 1 : 0;
-	my $game_port_listening = is_port_listening_without_decrypt($server_ip, $server_port);
-	my $query_port_listening = $query_port ne "" ? is_port_listening_without_decrypt($server_ip, $query_port) : 0;
-	my $rcon_port_listening = $rcon_port ne "" ? is_port_listening_without_decrypt($server_ip, $rcon_port) : 0;
+	my @expected_ports = ();
+	my @listening_ports = ();
+	my @missing_ports = ();
+	if(defined($server_port) && $server_port =~ /^[0-9]+$/ && $server_port > 0)
+	{
+		push(@expected_ports, { name => "game", port => int($server_port), protocol => "any" });
+	}
+	if(defined($query_port) && $query_port ne "")
+	{
+		foreach my $part (split(/[\s,;]+/, $query_port))
+		{
+			next unless($part =~ /^[0-9]+$/ && $part > 0 && $part <= 65535);
+			push(@expected_ports, { name => "query", port => int($part), protocol => "any" });
+		}
+	}
+	if(defined($rcon_port) && $rcon_port ne "")
+	{
+		foreach my $part (split(/[\s,;]+/, $rcon_port))
+		{
+			next unless($part =~ /^[0-9]+$/ && $part > 0 && $part <= 65535);
+			push(@expected_ports, { name => "rcon", port => int($part), protocol => "any" });
+		}
+	}
+	foreach my $expected (@expected_ports)
+	{
+		if(is_port_listening_without_decrypt($server_ip, $expected->{port}, $expected->{protocol}))
+		{
+			push(@listening_ports, $expected);
+		}
+		else
+		{
+			push(@missing_ports, $expected);
+		}
+	}
+	my $game_port_listening = 0;
+	my $query_port_listening = 0;
+	my $rcon_port_listening = 0;
+	foreach my $port (@listening_ports)
+	{
+		$game_port_listening = 1 if($port->{name} eq "game");
+		$query_port_listening = 1 if($port->{name} eq "query");
+		$rcon_port_listening = 1 if($port->{name} eq "rcon");
+	}
+	my $expected_count = scalar(@expected_ports);
+	my $listening_count = scalar(@listening_ports);
+	my $missing_count = scalar(@missing_ports);
 	my ($hint_timestamp, $stored_hint) = read_status_hint($home_id);
 	my $effective_hint = $state_hint ne "" ? $state_hint : $stored_hint;
 	my $last_error = "";
 	my $status = "UNKNOWN";
+	my $status_state = "Unknown";
 	my $ready = 0;
 
-	if($process_running && $game_port_listening)
+	if(!$process_running && $listening_count > 0)
+	{
+		$status = "WARNING";
+		$status_state = "Warning";
+		$last_error = "Required port is listening but the managed process/session is not running.";
+	}
+	elsif($process_running && $expected_count > 0 && $missing_count == 0)
 	{
 		$status = "ONLINE";
+		$status_state = "Running";
 		$ready = 1;
+	}
+	elsif($process_running && $expected_count > 0 && $listening_count > 0)
+	{
+		$status = "ONLINE";
+		$status_state = "Warning";
+		$ready = 1;
+		$last_error = "Process/session exists, but some expected ports are not listening.";
 	}
 	elsif($process_running)
 	{
 		if($effective_hint eq "STOPPING")
 		{
 			$status = "STOPPING";
+			$status_state = "Stopping";
 		}
 		elsif($hint_timestamp > 0 && (time() - $hint_timestamp) > $startup_timeout)
 		{
 			$status = "UNRESPONSIVE";
+			$status_state = "Failed";
 			$last_error = "Process/session exists but game port is not listening after startup timeout.";
 		}
 		else
 		{
 			$status = "STARTING";
+			$status_state = "Starting";
 		}
-	}
-	elsif($game_port_listening)
-	{
-		$status = "ONLINE";
-		$ready = 1;
-		$last_error = "Game port is listening but the managed screen session is not running.";
 	}
 	else
 	{
 		$status = "OFFLINE";
+		$status_state = "Stopped";
 		clear_pid_metadata($home_id);
 	}
 
 	return {
 		status => $status,
-		StatusState => $status eq "ONLINE" ? "Running" : ($status eq "OFFLINE" ? "Stopped" : ($status eq "UNRESPONSIVE" ? "Failed" : "Starting")),
-		status_state => $status eq "ONLINE" ? "Running" : ($status eq "OFFLINE" ? "Stopped" : ($status eq "UNRESPONSIVE" ? "Failed" : "Starting")),
+		StatusState => $status_state,
+		status_state => $status_state,
 		ready => $ready,
 		ProcessRunning => $process_running,
 		process_running => $process_running,
@@ -1112,12 +1181,16 @@ sub server_status_without_decrypt
 		game_port_listening => $game_port_listening ? 1 : 0,
 		query_port_listening => $query_port_listening ? 1 : 0,
 		rcon_port_listening => $rcon_port_listening ? 1 : 0,
-		ExpectedPorts => [ { name => "game", port => int($server_port), protocol => "any" } ],
-		ListeningPorts => $game_port_listening ? [ { name => "game", port => int($server_port), protocol => "any" } ] : [],
-		MissingPorts => $game_port_listening ? [] : [ { name => "game", port => int($server_port), protocol => "any" } ],
+		ExpectedPorts => \@expected_ports,
+		expected_ports => \@expected_ports,
+		ListeningPorts => \@listening_ports,
+		listening_ports => \@listening_ports,
+		MissingPorts => \@missing_ports,
+		missing_ports => \@missing_ports,
 		pid => $game_pid ne "" ? $game_pid : $screen_pid,
 		screen_pid => $screen_pid,
 		windows_pid => "",
+		linux_pid => $linux_pid,
 		session_name => $screen_id,
 		ip => $server_ip,
 		port => $server_port,
@@ -1126,17 +1199,6 @@ sub server_status_without_decrypt
 		last_error => $last_error,
 		query_info => ""
 	};
-}
-
-# Delete Server Stopped Status File:
-sub deleteStoppedStatFile
-{
-	my ($home_path) = @_;
-	my $server_stop_status_file = Path::Class::File->new($home_path, "SERVER_STOPPED");
-	if(-e $server_stop_status_file)
-	{
-		unlink $server_stop_status_file;
-	}
 }
 
 # Universal startup function
@@ -1172,6 +1234,7 @@ sub universal_start_without_decrypt
 	my $ogpAgentGroup = `whoami`;
 
 	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
+	my $status_hint_file = get_status_hint_path($home_id);
 
 	chomp $ogpAgentGroup;
 
@@ -1301,8 +1364,7 @@ sub universal_start_without_decrypt
 		}
 
 		if(defined($Cfg::Preferences{ogp_autorestart_server}) &&  $Cfg::Preferences{ogp_autorestart_server} eq "1"){
-			deleteStoppedStatFile($home_path);
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
 		}
@@ -1317,8 +1379,7 @@ sub universal_start_without_decrypt
 		}
 
 		if(defined($Cfg::Preferences{ogp_autorestart_server}) &&  $Cfg::Preferences{ogp_autorestart_server} eq "1"){
-			deleteStoppedStatFile($home_path);
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
 		}
@@ -1333,8 +1394,7 @@ sub universal_start_without_decrypt
 		}
 
 		if(defined($Cfg::Preferences{ogp_autorestart_server}) &&  $Cfg::Preferences{ogp_autorestart_server} eq "1"){
-			deleteStoppedStatFile($home_path);
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
 		}
@@ -1694,21 +1754,6 @@ sub stop_server_without_decrypt
 		  or logger "Cannot remove the startup flag file $startup_file $!";
 	}
 
-	# Create file indicator that the game server has been stopped if defined
-	if(defined($Cfg::Preferences{ogp_autorestart_server}) &&  $Cfg::Preferences{ogp_autorestart_server} eq "1"){
-
-		# Get current directory and chdir into the game's home dir
-		my $curDir = getcwd();
-		chdir $home_path;
-
-		# Create stopped indicator file used by autorestart of OGP if server crashes
-		open(STOPFILE, '>', "SERVER_STOPPED");
-		close(STOPFILE);
-
-		# Return to original directory
-		chdir $curDir;
-	}
-
 	# Some validation checks for the variables.
 	if ($server_ip =~ /^\s*$/ || $server_port < 0 || $server_port > 65535)
 	{
@@ -1840,7 +1885,7 @@ sub stop_server_without_decrypt
 			{
 				logger "Stopped server $server_ip:$server_port with rcon quit.";
 				force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
-				return verify_server_stopped_without_decrypt($home_id, $server_ip, $server_port);
+				return verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port);
 			}
 		else
 		{
@@ -1876,7 +1921,7 @@ sub stop_server_without_decrypt
 		}
 			sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
 			force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
-			return verify_server_stopped_without_decrypt($home_id, $server_ip, $server_port);
+			return verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port);
 		}
 	else
 	{
@@ -1910,11 +1955,11 @@ sub stop_server_without_decrypt
 		}
 			sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
 			force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
-			return verify_server_stopped_without_decrypt($home_id, $server_ip, $server_port);
+			return verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port);
 		}
 	}
 
-sub verify_server_stopped_without_decrypt
+sub verify_runtime_stop_complete_without_decrypt
 {
 	my ($home_id, $server_ip, $server_port) = @_;
 	my $pid_meta = read_pid_metadata($home_id);
@@ -1928,6 +1973,7 @@ sub verify_server_stopped_without_decrypt
 		if(!$session_running && !$pid_running && !$port_listening)
 		{
 			clear_pid_metadata($home_id);
+			write_status_hint($home_id, "STOPPED");
 			return 0;
 		}
 		sleep 2;
@@ -1949,6 +1995,7 @@ sub verify_server_stopped_without_decrypt
 		return 1;
 	}
 	clear_pid_metadata($home_id);
+	write_status_hint($home_id, "STOPPED");
 	return 0;
 }
 
@@ -4094,7 +4141,7 @@ sub restart_server_without_decrypt
 	{
 		logger "Waiting 60 seconds before starting the server again.";
 		sleep 60;
-		if (verify_server_stopped_without_decrypt($home_id, $server_ip, $server_port) != 0)
+		if (verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port) != 0)
 		{
 			logger "Restart cancelled: previous instance is still active after stop wait window.";
 			return -2;

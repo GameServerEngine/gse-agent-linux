@@ -80,6 +80,9 @@ Stop escalation now verifies all of the following are cleared before success:
 2. tracked process PID(s)
 3. listening game port
 
+Lifecycle control no longer uses game-home `SERVER_STOPPED` marker files.
+Explicit stop intent and autorestart suppression are now controlled through agent-owned runtime status hints (`STOPPING`/`STOPPED`) and verified runtime checks.
+
 Restart remains stop-first and waits 60 seconds, then re-verifies stop completion before starting again to avoid duplicate instances.
 
 ## Related docs
