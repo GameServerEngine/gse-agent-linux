@@ -1570,6 +1570,55 @@ sub log_path_has_wildcards
 	return defined($path) && $path =~ /[*?\[]/ ? 1 : 0;
 }
 
+sub wildcard_pattern_to_regex
+{
+	my ($pattern) = @_;
+	return undef unless defined($pattern);
+
+	my $regex = '';
+	my @chars = split(//, $pattern);
+	my $in_class = 0;
+	for (my $i = 0; $i <= $#chars; $i++)
+	{
+		my $c = $chars[$i];
+		if (!$in_class)
+		{
+			if ($c eq '*')
+			{
+				$regex .= '[^/]*';
+			}
+			elsif ($c eq '?')
+			{
+				$regex .= '[^/]';
+			}
+			elsif ($c eq '[')
+			{
+				$in_class = 1;
+				$regex .= '[';
+			}
+			else
+			{
+				$regex .= quotemeta($c);
+			}
+		}
+		else
+		{
+			if ($c eq ']')
+			{
+				$in_class = 0;
+				$regex .= ']';
+			}
+			else
+			{
+				$regex .= $c;
+			}
+		}
+	}
+
+	return undef if $in_class;
+	return qr/^$regex\z/i;
+}
+
 sub resolve_latest_log_match
 {
 	my ($home_path, $pattern) = @_;
@@ -1583,8 +1632,11 @@ sub resolve_latest_log_match
 
 	my $home_abs = Cwd::abs_path($home_path);
 	return undef unless defined($home_abs);
-
-	my @matches = bsd_glob("$home_path/$pattern", GLOB_NOSORT);
+	my $regex = wildcard_pattern_to_regex($pattern);
+	return undef unless defined($regex);
+	my $glob_pattern = $pattern;
+	$glob_pattern =~ s/\[([^\]]+)\]/\*/g;
+	my @matches = bsd_glob("$home_path/$glob_pattern", GLOB_NOSORT);
 	my @candidates = ();
 	foreach my $candidate (@matches)
 	{
@@ -1592,6 +1644,12 @@ sub resolve_latest_log_match
 		my $candidate_abs = Cwd::abs_path($candidate);
 		next unless defined($candidate_abs);
 		next unless $candidate_abs eq $home_abs || index($candidate_abs, "$home_abs/") == 0;
+		my $candidate_rel = $candidate_abs;
+		$candidate_rel =~ s{\\}{/}g;
+		my $home_norm = $home_abs;
+		$home_norm =~ s{\\}{/}g;
+		$candidate_rel =~ s/^\Q$home_norm\E\/?//;
+		next unless $candidate_rel =~ $regex;
 		my $mtime = (stat($candidate_abs))[9] || 0;
 		push(@candidates, [ $candidate_abs, $mtime ]);
 	}
@@ -1640,8 +1698,9 @@ sub get_log
 			if (!defined($resolved_log_file))
 			{
 				logger "No log files matched wildcard pattern '$log_file' in '$home_path'.";
-				return -8;
+				return "-8;" . encode("No log files matched pattern: $log_file");
 			}
+			logger "Wildcard log '$log_file' resolved to '$resolved_log_file'.";
 			$log_file = Path::Class::File->new($resolved_log_file);
 		}
 		else
