@@ -44,6 +44,9 @@ use File::Path qw(mkpath);
 use Archive::Extract;	 # Used to handle archived files.
 use File::Find;
 use Schedule::Cron; # Used for scheduling tasks
+use JSON::PP;
+use Digest::SHA qw(hmac_sha256_hex);
+use Sys::Hostname qw(hostname);
 
 # Compression tools
 use IO::Compress::Bzip2 qw(bzip2 $Bzip2Error); # Used to compress files to bz2.
@@ -90,6 +93,10 @@ use constant GAME_STARTUP_DIR =>
   Path::Class::Dir->new(AGENT_RUN_DIR, 'startups');
 use constant SERVER_RUNTIME_DIR =>
 	Path::Class::Dir->new(AGENT_RUN_DIR, 'runtime_status');
+use constant AGENT_EVENTS_DIR =>
+	Path::Class::Dir->new(AGENT_RUN_DIR, 'events');
+use constant AGENT_EVENT_QUEUE_FILE =>
+	Path::Class::File->new(AGENT_EVENTS_DIR, 'pending-events.jsonl');
 use constant SCREENRC_FILE =>
   Path::Class::File->new(AGENT_RUN_DIR, 'ogp_screenrc');
 use constant SCREENRC_FILE_BK =>
@@ -158,6 +165,252 @@ sub logger
 	print LOGFILE "$logcmd" or die("Failed to write to log file.");
 	flock(LOGFILE, LOCK_UN) or die("Failed to unlock log file.");
 	close(LOGFILE) or die("Failed to close log file.");
+}
+
+sub agent_event_panel_url
+{
+	return $Cfg::Config{agent_event_url} if(defined($Cfg::Config{agent_event_url}) && $Cfg::Config{agent_event_url} ne "");
+	if(defined($Cfg::Config{web_api_url}) && $Cfg::Config{web_api_url} ne "")
+	{
+		my $url = $Cfg::Config{web_api_url};
+		$url =~ s/ogp_api\.php(?:\?.*)?$/agent_event_receiver.php/;
+		return $url if($url =~ /agent_event_receiver\.php$/);
+		$url =~ s/\/+$//;
+		return "$url/agent_event_receiver.php";
+	}
+	return "";
+}
+
+sub agent_event_remote_server_id
+{
+	return $Cfg::Config{remote_server_id} if(defined($Cfg::Config{remote_server_id}) && $Cfg::Config{remote_server_id} =~ /^\d+$/);
+	return $Cfg::Config{agent_remote_server_id} if(defined($Cfg::Config{agent_remote_server_id}) && $Cfg::Config{agent_remote_server_id} =~ /^\d+$/);
+	return "";
+}
+
+sub new_correlation_id
+{
+	return time() . "-" . $$ . "-" . int(rand(1000000000));
+}
+
+sub new_agent_event_uuid
+{
+	return "agent-" . new_correlation_id();
+}
+
+sub build_agent_event
+{
+	my ($event_type, $severity, $fields) = @_;
+	$fields = {} unless(ref($fields) eq 'HASH');
+	my %event = %$fields;
+	$event{event_uuid} ||= new_agent_event_uuid();
+	$event{timestamp_utc} ||= gmtime() . " UTC";
+	$event{event_type} = $event_type;
+	$event{severity} = $severity;
+	$event{source} = "agent";
+	$event{agent_os} ||= "Linux";
+	$event{agent_hostname} ||= hostname();
+	$event{remote_server_id} ||= agent_event_remote_server_id();
+	$event{correlation_id} ||= new_correlation_id();
+	foreach my $secret_key (qw(password control_password steam_password encryption_key database_password envVars environment_variables))
+	{
+		delete $event{$secret_key};
+	}
+	return \%event;
+}
+
+sub agent_event_json
+{
+	my ($event) = @_;
+	return JSON::PP->new->ascii->canonical->encode($event);
+}
+
+sub send_agent_event
+{
+	my ($event) = @_;
+	my $url = agent_event_panel_url();
+	my $remote_server_id = agent_event_remote_server_id();
+	return 0 if($url eq "" || $remote_server_id eq "" || AGENT_KEY eq "");
+	my $body = agent_event_json($event);
+	my $timestamp = time();
+	my $signature = "sha256=" . hmac_sha256_hex($timestamp . "." . $body, AGENT_KEY);
+	my $ua = LWP::UserAgent->new(timeout => 5, ssl_opts => { verify_hostname => 0, SSL_verify_mode => 0x00 });
+	my $response = $ua->post($url,
+		'Content-Type' => 'application/json',
+		'X-GSP-Agent-Id' => $remote_server_id,
+		'X-GSP-Agent-Timestamp' => $timestamp,
+		'X-GSP-Agent-Signature' => $signature,
+		Content => $body
+	);
+	return ($response && $response->is_success) ? 1 : 0;
+}
+
+sub append_agent_event_queue
+{
+	my ($event) = @_;
+	mkpath(AGENT_EVENTS_DIR) unless(-d AGENT_EVENTS_DIR);
+	if(open(EVENTQ, '>>', AGENT_EVENT_QUEUE_FILE))
+	{
+		flock(EVENTQ, LOCK_EX);
+		print EVENTQ agent_event_json($event) . "\n";
+		flock(EVENTQ, LOCK_UN);
+		close(EVENTQ);
+	}
+	if(-e AGENT_EVENT_QUEUE_FILE && -s AGENT_EVENT_QUEUE_FILE > 1048576)
+	{
+		rename(AGENT_EVENT_QUEUE_FILE, AGENT_EVENT_QUEUE_FILE . "." . time() . ".old");
+	}
+}
+
+sub flush_agent_event_queue
+{
+	return 0 unless(-e AGENT_EVENT_QUEUE_FILE);
+	open(EVENTQ, '<', AGENT_EVENT_QUEUE_FILE) or return 0;
+	my @lines = <EVENTQ>;
+	close(EVENTQ);
+	my @remaining;
+	my $delivered = 0;
+	foreach my $line (@lines)
+	{
+		chomp($line);
+		next if($line eq "");
+		my $event = eval { JSON::PP->new->decode($line) };
+		if($@ || ref($event) ne 'HASH')
+		{
+			next;
+		}
+		if(send_agent_event($event))
+		{
+			$delivered++;
+		}
+		else
+		{
+			push(@remaining, $line);
+		}
+	}
+	if(open(EVENTQ, '>', AGENT_EVENT_QUEUE_FILE))
+	{
+		flock(EVENTQ, LOCK_EX);
+		print EVENTQ join("\n", @remaining) . (@remaining ? "\n" : "");
+		flock(EVENTQ, LOCK_UN);
+		close(EVENTQ);
+	}
+	return $delivered;
+}
+
+sub queue_agent_event
+{
+	my ($event_type, $severity, $fields) = @_;
+	my $event = build_agent_event($event_type, $severity, $fields);
+	if(send_agent_event($event))
+	{
+		flush_agent_event_queue();
+		return 1;
+	}
+	append_agent_event_queue($event);
+	return 0;
+}
+
+sub agent_event_state_path
+{
+	my ($home_id) = @_;
+	$home_id =~ s/[^0-9]//g;
+	return Path::Class::File->new(AGENT_EVENTS_DIR, "state-$home_id.kv");
+}
+
+sub read_agent_event_state
+{
+	my ($home_id) = @_;
+	my %state;
+	my $file = agent_event_state_path($home_id);
+	return \%state unless(-e $file);
+	open(STATE, '<', $file) or return \%state;
+	while(my $line = <STATE>)
+	{
+		chomp($line);
+		next unless($line =~ /^([^=]+)=(.*)$/);
+		$state{$1} = $2;
+	}
+	close(STATE);
+	return \%state;
+}
+
+sub write_agent_event_state
+{
+	my ($home_id, $state) = @_;
+	mkpath(AGENT_EVENTS_DIR) unless(-d AGENT_EVENTS_DIR);
+	my $file = agent_event_state_path($home_id);
+	open(STATE, '>', $file) or return 0;
+	foreach my $key (sort keys %$state)
+	{
+		my $value = defined($state->{$key}) ? $state->{$key} : "";
+		$value =~ s/[\r\n]//g;
+		print STATE "$key=$value\n";
+	}
+	close(STATE);
+	return 1;
+}
+
+sub record_server_state_transition
+{
+	my ($status_info) = @_;
+	return unless(ref($status_info) eq 'HASH');
+	my $home_id = $status_info->{home_id};
+	return unless(defined($home_id) && $home_id =~ /^\d+$/);
+	my $previous = read_agent_event_state($home_id);
+	my $current_status = $status_info->{status} || "UNKNOWN";
+	my $previous_status = $previous->{status} || "";
+	my $now = time();
+	my ($hint_time, $hint) = read_status_hint($home_id);
+	my ($event_type, $severity);
+	if($hint eq "AUTORESTARTING" && !($previous->{autorestart_pending} || 0))
+	{
+		($event_type, $severity) = ("automatic_restart_started", "warning");
+		$previous->{autorestart_pending} = 1;
+	}
+	elsif(($previous->{autorestart_pending} || 0) && $current_status eq "ONLINE")
+	{
+		($event_type, $severity) = ("automatic_restart_succeeded", "info");
+		delete $previous->{autorestart_pending};
+	}
+	elsif(($previous->{autorestart_pending} || 0) && $current_status eq "UNRESPONSIVE")
+	{
+		($event_type, $severity) = ("automatic_restart_failed", "error");
+		delete $previous->{autorestart_pending};
+	}
+	elsif($previous_status eq "ONLINE" && $current_status eq "OFFLINE")
+	{
+		($event_type, $severity) = ($hint eq "STOPPING" || $hint eq "STOPPED") ? ("server_stop_confirmed", "info") : ("server_crash_detected", "warning");
+	}
+	elsif($previous_status ne "ONLINE" && $current_status eq "ONLINE")
+	{
+		($event_type, $severity) = ("server_start_confirmed", "info");
+	}
+	elsif($current_status eq "UNRESPONSIVE" && $previous_status ne "UNRESPONSIVE")
+	{
+		($event_type, $severity) = ("server_unresponsive", "warning");
+	}
+	elsif($current_status eq "WARNING" && $previous_status ne "WARNING")
+	{
+		$event_type = $status_info->{process_running} ? "server_process_found_without_port" : "server_port_found_without_managed_process";
+		$severity = "warning";
+	}
+	elsif(($previous_status eq "WARNING" || $previous_status eq "UNRESPONSIVE") && $current_status eq "ONLINE")
+	{
+		($event_type, $severity) = ("server_port_restored", "notice");
+	}
+	if($event_type)
+	{
+		my $last_sent = $previous->{"sent_$event_type"} || 0;
+		if($previous_status ne $current_status || ($now - $last_sent) > 900)
+		{
+			queue_agent_event($event_type, $severity, $status_info);
+			$previous->{"sent_$event_type"} = $now;
+		}
+	}
+	$previous->{status} = $current_status;
+	$previous->{updated_at} = $now;
+	write_agent_event_state($home_id, $previous);
 }
 
 # Rotate the log file
@@ -636,6 +889,7 @@ sub create_screen_cmd_loop
 		. "if [ -f \"$status_hint_file\" ] && grep -E \"^[0-9]+,(STOPPING|STOPPED)$\" \"$status_hint_file\" >/dev/null 2>&1; then" . "\n"
 		. "exit 0" . "\n"
 		. "fi" . "\n"
+		. "if [ -n \"$status_hint_file\" ]; then echo \"`date +%s`,AUTORESTARTING\" > \"$status_hint_file\"; fi" . "\n"
 		. "if [ \"\$DIFF\" -gt 15 ]; then" . "\n"
 		. "startServer" . "\n"
 		. "fi" . "\n"
@@ -1169,7 +1423,8 @@ sub server_status_without_decrypt
 		clear_pid_metadata($home_id);
 	}
 
-	return {
+	my $status_info = {
+		home_id => $home_id,
 		status => $status,
 		StatusState => $status_state,
 		status_state => $status_state,
@@ -1196,9 +1451,12 @@ sub server_status_without_decrypt
 		port => $server_port,
 		query_port => $query_port,
 		rcon_port => $rcon_port,
+		game_port => $server_port,
 		last_error => $last_error,
 		query_info => ""
 	};
+	record_server_state_transition($status_info);
+	return $status_info;
 }
 
 # Universal startup function
@@ -1429,6 +1687,19 @@ sub universal_start_without_decrypt
 		game_pid => $game_pid,
 		ip => $server_ip,
 		port => $server_port
+	});
+	queue_agent_event("server_process_started", "info", {
+		home_id => $home_id,
+		game_home_path => $home_path,
+		ip => $server_ip,
+		game_port => $server_port,
+		screen_session_name => $screen_id,
+		tracked_pid => $game_pid,
+		detected_process_pid => $game_pid,
+		actual_process_state => "starting",
+		actual_session_state => $screen_pid ne "" ? "present" : "unknown",
+		actual_port_state => "pending_validation",
+		message => "Server process start command completed; status polling will confirm port readiness."
 	});
 
 	renice_process_without_decrypt($home_id, $nice);
@@ -2033,6 +2304,16 @@ sub verify_runtime_stop_complete_without_decrypt
 		{
 			clear_pid_metadata($home_id);
 			write_status_hint($home_id, "STOPPED");
+			queue_agent_event("server_stop_confirmed", "info", {
+				home_id => $home_id,
+				ip => $server_ip,
+				game_port => $server_port,
+				tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
+				actual_process_state => "stopped",
+				actual_session_state => "stopped",
+				actual_port_state => "closed",
+				message => "Server stop confirmed after process, session, and port validation."
+			});
 			return 0;
 		}
 		sleep 2;
@@ -2051,10 +2332,30 @@ sub verify_runtime_stop_complete_without_decrypt
 	if($session_running || $pid_running || $port_listening)
 	{
 		logger "Server $server_ip:$server_port is still running or listening after stop escalation.";
+		queue_agent_event("server_unresponsive", "error", {
+			home_id => $home_id,
+			ip => $server_ip,
+			game_port => $server_port,
+			tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
+			actual_process_state => $pid_running ? "running" : "stopped",
+			actual_session_state => $session_running ? "running" : "stopped",
+			actual_port_state => $port_listening ? "listening" : "closed",
+			message => "Server remained active after stop escalation."
+		});
 		return 1;
 	}
 	clear_pid_metadata($home_id);
 	write_status_hint($home_id, "STOPPED");
+	queue_agent_event("server_stop_confirmed", "info", {
+		home_id => $home_id,
+		ip => $server_ip,
+		game_port => $server_port,
+		tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
+		actual_process_state => "stopped",
+		actual_session_state => "stopped",
+		actual_port_state => "closed",
+		message => "Server stop confirmed after escalation."
+	});
 	return 0;
 }
 
@@ -4192,7 +4493,21 @@ sub restart_server_without_decrypt
 {
 	my ($home_id, $server_ip, $server_port, $control_protocol,
 		$control_password, $control_type, $home_path, $server_exe, $run_dir,
-		$cmd, $cpu, $nice, $preStart, $envVars, $game_key, $console_log) = @_;
+		$cmd, $cpu, $nice, $preStart, $envVars, $game_key, $console_log, $restart_reason) = @_;
+	$restart_reason = "panel_restart" unless(defined($restart_reason) && $restart_reason ne "");
+	my $correlation_id = new_correlation_id();
+	my $restart_started_event = $restart_reason eq "scheduled_restart" ? "scheduled_restart_started" : "automatic_restart_started";
+	my $restart_success_event = $restart_reason eq "scheduled_restart" ? "scheduled_restart_succeeded" : "automatic_restart_succeeded";
+	my $restart_failed_event = $restart_reason eq "scheduled_restart" ? "scheduled_restart_failed" : "automatic_restart_failed";
+	my $report_restart_events = ($restart_reason eq "scheduled_restart" || $restart_reason eq "automatic_restart") ? 1 : 0;
+	queue_agent_event($restart_started_event, "info", {
+		home_id => $home_id,
+		ip => $server_ip,
+		game_port => $server_port,
+		restart_reason => $restart_reason,
+		correlation_id => $correlation_id,
+		message => "Restart operation started."
+	}) if($report_restart_events);
 
 		if (stop_server_without_decrypt($home_id, $server_ip,
 										$server_port, $control_protocol,
@@ -4203,20 +4518,54 @@ sub restart_server_without_decrypt
 		if (verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port) != 0)
 		{
 			logger "Restart cancelled: previous instance is still active after stop wait window.";
+			queue_agent_event($restart_failed_event, "error", {
+				home_id => $home_id,
+				ip => $server_ip,
+				game_port => $server_port,
+				restart_reason => $restart_reason,
+				correlation_id => $correlation_id,
+				message => "Restart cancelled because previous instance was still active."
+			}) if($report_restart_events);
 			return -2;
 		}
 		if (universal_start_without_decrypt($home_id, $home_path, $server_exe, $run_dir,
 											$cmd, $server_port, $server_ip, $cpu, $nice, $preStart, $envVars, $game_key, $console_log) == 1)
 		{
+			queue_agent_event($restart_success_event, "info", {
+				home_id => $home_id,
+				game_home_path => $home_path,
+				ip => $server_ip,
+				game_port => $server_port,
+				restart_reason => $restart_reason,
+				correlation_id => $correlation_id,
+				message => "Restart command completed; status polling will confirm process and port readiness."
+			}) if($report_restart_events);
 			return 1;
 		}
 		else
 		{
+			queue_agent_event($restart_failed_event, "error", {
+				home_id => $home_id,
+				game_home_path => $home_path,
+				ip => $server_ip,
+				game_port => $server_port,
+				restart_reason => $restart_reason,
+				correlation_id => $correlation_id,
+				message => "Restart failed because the server start path returned an error."
+			}) if($report_restart_events);
 			return -1;
 		}
 	}
 	else
 	{
+		queue_agent_event($restart_failed_event, "error", {
+			home_id => $home_id,
+			ip => $server_ip,
+			game_port => $server_port,
+			restart_reason => $restart_reason,
+			correlation_id => $correlation_id,
+			message => "Restart failed because the server could not be stopped."
+		}) if($report_restart_events);
 		return -2;
 	}
 }
@@ -5381,7 +5730,7 @@ sub scheduler_server_action
 	elsif($action eq "%ACTION=restart")
 	{
 		my ($home_id, $ip, $port) = ($server_args[0], $server_args[1], $server_args[2]);
-		my $ret = restart_server_without_decrypt(@server_args);
+		my $ret = restart_server_without_decrypt(@server_args, "scheduled_restart");
 		if($ret == 1)
 		{
 			scheduler_log_events("Restarted server home ID $home_id on address $ip:$port");
@@ -6074,7 +6423,7 @@ sub steam_workshop_without_decrypt
 											  $regex, $mods_backreference_index,
 											  $variable, $place_after, $mod_string,
 											  $string_separator, $config_file_path,
-											  $post_install, $mod_names_list);
+											  $post_install, $mod_names_list, $home_id);
 
 	my $bash_scripts_path = MANUAL_TMP_DIR . "/home_id_" . $home_id;
 
@@ -6099,19 +6448,25 @@ sub	generate_post_install_scripts
 		$regex, $mods_backreference_index,
 		$variable, $place_after, $mod_string,
 		$string_separator, $config_file_path,
-		$post_install, $mod_names_list) = @_;
+		$post_install, $mod_names_list, $home_id) = @_;
 
 	my $post_install_scripts = "";
 	my $mods_info_path = Path::Class::Dir->new(AGENT_RUN_DIR, 'WorkshopModsInfo');
 	$post_install_scripts .= "mods_full_path=\"$mods_full_path\"\n".
 							 "workshop_id=\"$workshop_id\"\n".
+							 "home_id=\"$home_id\"\n".
 							 "regex=\"$regex\"\n".
 							 "mods_backreference_index=\"$mods_backreference_index\"\n".
 							 "variable=\"$variable\"\n".
 							 "place_after=\"$place_after\"\n".
 							 "string_separator=\"$string_separator\"\n".
 							 "config_file_path=\"$config_file_path\"\n".
-							 "mods_info_path=\"$mods_info_path/\"\n";
+							 "mods_info_path=\"$mods_info_path/\"\n".
+							 "mods_info_home_path=\"$mods_info_path/home_$home_id/\"\n".
+							 "workshop_status_path=\"$mods_full_path/WorkshopInstallStatus.json\"\n".
+							 "write_workshop_status(){ status=\"\$1\"; message=\"\$2\"; now=\"\$(date '+%Y-%m-%d %H:%M:%S')\"; message_json=\$(printf '%s' \"\$message\"|sed 's/\\\\/\\\\\\\\/g;s/\"/\\\\\"/g'); printf '{\"operation\":\"steam_workshop\",\"home_id\":\"%s\",\"workshop_app_id\":\"%s\",\"status\":\"%s\",\"message\":\"%s\",\"updated_at\":\"%s\"}\\n' \"\$home_id\" \"\$workshop_id\" \"\$status\" \"\$message_json\" \"\$now\" > \"\$workshop_status_path\"; }\n".
+							 "write_workshop_status running \"Workshop install running\"\n".
+							 "trap 'rc=\$?; if [ \$rc -ne 0 ]; then write_workshop_status failed \"Workshop install failed\"; echo GSP_WORKSHOP_INSTALL_FAILED; fi' EXIT\n";
 	my @workshop_mods = split /,/, $mods_list;
 	my @mod_names = split /,/, $mod_names_list;
 
@@ -6121,6 +6476,10 @@ sub	generate_post_install_scripts
 		my $steamcmd_download_path = '/steamapps/workshop/content/'.$workshop_id.'/'.$workshop_mod_id.'/';
 		my $workshop_mod_path = $mods_full_path.$steamcmd_download_path;
 		my $this_mod_string = $mod_string;
+		if(!defined $this_mod_string || $this_mod_string eq '')
+		{
+			$this_mod_string = '%workshop_mod_id%';
+		}
 		$this_mod_string =~ s/\%workshop_mod_id\%/$workshop_mod_id/g;
 
 		$post_install_scripts .= "mod_string[$index]=\"$this_mod_string\"\n".
@@ -6130,11 +6489,7 @@ sub	generate_post_install_scripts
 		$index++;
 	}
 
-	$post_install_scripts .= 'if [ ! -e $config_file_path ];then'."\n".
-							 '	if [ ! -d "$(dirname $config_file_path)" ];then mkdir -p "$(dirname $config_file_path)";fi'."\n".
-							 '	echo -e "${place_after}\n${variable}" > $config_file_path'."\n".
-							 'fi'."\n".
-							 'i=0'."\n".
+	$post_install_scripts .= 'i=0'."\n".
 							 'for mod_id in "${workshop_mod_id[@]}"'."\n".
 							 'do'."\n".
 							 '	first_file="$(ls "${workshop_mod_path[$i]}"| sort -n | head -1)"'."\n";
@@ -6149,46 +6504,66 @@ sub	generate_post_install_scripts
 		}
 	}
 
-	$post_install_scripts .= '	file_content=$(cat $config_file_path)'."\n".
-							 '	if [[ $file_content =~ $regex ]]; then'."\n".
-							 '		full_match="${BASH_REMATCH[0]}"'."\n".
-							 '		mods_match="${BASH_REMATCH[$mods_backreference_index]}"'."\n".
-							 '		found=1'."\n".
-							 '	else'."\n".
-							 '		found=0'."\n".
-							 '	fi'."\n".
-							 '	first_file_string="\%first_file%"'."\n".
-
+	$post_install_scripts .= '	first_file_string="\%first_file%"'."\n".
 							 '	if [ -z "${mod_string[$i]##*$first_file_string*}" ];then'."\n".
 							 '		mod_string[$i]="${mod_string[$i]/$first_file_string/$first_file}"'."\n".
-							 '	fi'."\n".
-							 '	if [ $found == 1 ] && [ "X$full_match" != "X" ];then'."\n".
-							 '		if [ "X$mods_match" == "X" ];then'."\n".
-							 '			new_mods=$(echo -e "${full_match}${mod_string[$i]}")'."\n".
-							 '			echo -e "${file_content/$full_match/$new_mods}">"$config_file_path"'."\n".
-							 '		else'."\n".
-							 '			if [ ! -z "${mods_match##*${mod_string[$i]}*}" ];then'."\n".
-							 '				new_mods=$(echo -e "${full_match}${string_separator}${mod_string[$i]}")'."\n".
-							 '				echo -e "${file_content/$full_match/$new_mods}">"$config_file_path"'."\n".
-							 '			fi'."\n".
-							 '		fi'."\n".
-							 '	else'."\n".
-							 '		if [ "X$place_after" == "X" ];then'."\n".
-							 '			echo -e "${file_content}${variable}${mod_string[$i]}">"$config_file_path"'."\n".
-							 '		else'."\n".
-							 '			if [ -z "${file_content##*${place_after}*}" ];then'."\n".
-							 '				new_var="${variable}${mod_string[$i]}"'."\n".
-							 '				place_after_esc=$(echo -e "$place_after"|sed -e \'s/[]\\/$*.^[]/\\\\&/g\')'."\n".
-							 '				echo -e "$file_content"|sed \'/\'$place_after_esc\'/a \'$new_var>"$config_file_path"'."\n".
-							 '			else'."\n".
-							 '				echo -e "${file_content}${place_after}\n${variable}${mod_string[$i]}">"$config_file_path"'."\n".
-							 '			fi'."\n".
-							 '		fi'."\n".
-							 '	fi'."\n".
+							 '	fi'."\n";
+
+	if(defined $config_file_path && $config_file_path ne '')
+	{
+		$post_install_scripts .= '	if [ ! -e "$config_file_path" ];then'."\n".
+								 '		if [ ! -d "$(dirname "$config_file_path")" ];then mkdir -p "$(dirname "$config_file_path")";fi'."\n".
+								 '		echo -e "${place_after}\n${variable}" > "$config_file_path"'."\n".
+								 '	fi'."\n".
+								 '	file_content=$(cat "$config_file_path")'."\n".
+								 '	if [[ $file_content =~ $regex ]]; then'."\n".
+								 '		full_match="${BASH_REMATCH[0]}"'."\n".
+								 '		mods_match="${BASH_REMATCH[$mods_backreference_index]}"'."\n".
+								 '		found=1'."\n".
+								 '	else'."\n".
+								 '		found=0'."\n".
+								 '	fi'."\n".
+								 '	if [ $found == 1 ] && [ "X$full_match" != "X" ];then'."\n".
+								 '		if [ "X$mods_match" == "X" ];then'."\n".
+								 '			new_mods=$(echo -e "${full_match}${mod_string[$i]}")'."\n".
+								 '			echo -e "${file_content/$full_match/$new_mods}">"$config_file_path"'."\n".
+								 '		else'."\n".
+								 '			if [ ! -z "${mods_match##*${mod_string[$i]}*}" ];then'."\n".
+								 '				new_mods=$(echo -e "${full_match}${string_separator}${mod_string[$i]}")'."\n".
+								 '				echo -e "${file_content/$full_match/$new_mods}">"$config_file_path"'."\n".
+								 '			fi'."\n".
+								 '		fi'."\n".
+								 '	else'."\n".
+								 '		if [ "X$place_after" == "X" ];then'."\n".
+								 '			echo -e "${file_content}${variable}${mod_string[$i]}">"$config_file_path"'."\n".
+								 '		else'."\n".
+								 '			if [ -z "${file_content##*${place_after}*}" ];then'."\n".
+								 '				new_var="${variable}${mod_string[$i]}"'."\n".
+								 '				place_after_esc=$(echo -e "$place_after"|sed -e \'s/[]\\/$*.^[]/\\\\&/g\')'."\n".
+								 '				echo -e "$file_content"|sed \'/\'$place_after_esc\'/a \'$new_var>"$config_file_path"'."\n".
+								 '			else'."\n".
+								 '				echo -e "${file_content}${place_after}\n${variable}${mod_string[$i]}">"$config_file_path"'."\n".
+								 '			fi'."\n".
+								 '		fi'."\n".
+								 '	fi'."\n";
+	}
+
+	$post_install_scripts .=
 							 '	if [ ! -d "${mods_info_path}" ];then mkdir -p "${mods_info_path}";fi'."\n".
-							 '	echo "${mod_name[$i]}" > "${mods_info_path}${mod_string[$i]}.ogpmod"'."\n".
+							 '	if [ ! -d "${mods_info_home_path}" ];then mkdir -p "${mods_info_home_path}";fi'."\n".
+							 '	installed_path=""'."\n".
+							 '	if [ -e "$mods_full_path/${mod_string[$i]}" ];then installed_path="$mods_full_path/${mod_string[$i]}";fi'."\n".
+							 '	if [ -z "$installed_path" ] && [ -e "$mods_full_path/@$mod_id" ];then installed_path="$mods_full_path/@$mod_id";fi'."\n".
+							 '	if [ -z "$installed_path" ] && [ -e "$mods_full_path/$mod_id" ];then installed_path="$mods_full_path/$mod_id";fi'."\n".
+							 '	installed_folder="$(basename "$installed_path")"'."\n".
+							 "	install_time=\"\$(date '+%Y-%m-%d %H:%M:%S')\"\n".
+							 '	printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "${mod_string[$i]}" "$mod_id" "${mod_name[$i]}" "$installed_folder" "$installed_path" "$workshop_id" "installed" "$install_time" "$install_time" > "${mods_info_home_path}${mod_id}.ogpmod"'."\n".
+							 '	printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "${mod_string[$i]}" "$mod_id" "${mod_name[$i]}" "$installed_folder" "$installed_path" "$workshop_id" "installed" "$install_time" "$install_time" > "${mods_info_path}${mod_string[$i]}.ogpmod"'."\n".
 							 '	i=$(expr $i + 1)'."\n".
-							 'done'."\n";
+							 'done'."\n".
+							 'write_workshop_status completed "Workshop install completed"'."\n".
+							 'trap - EXIT'."\n".
+							 'echo GSP_WORKSHOP_INSTALL_COMPLETE'."\n";
 	return "$post_install_scripts";
 }
 
@@ -6196,7 +6571,13 @@ sub get_workshop_mods_info()
 {
 	return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
 
+	my ($home_id) = decrypt_params(@_);
 	my $mods_info_dir_path = Path::Class::Dir->new(AGENT_RUN_DIR, 'WorkshopModsInfo');
+	if(defined $home_id && $home_id =~ /^\d+$/)
+	{
+		my $home_mods_info_dir_path = Path::Class::Dir->new($mods_info_dir_path, "home_$home_id");
+		$mods_info_dir_path = $home_mods_info_dir_path if(-d $home_mods_info_dir_path);
+	}
 
 	if(-d $mods_info_dir_path)
 	{
@@ -6214,7 +6595,14 @@ sub get_workshop_mods_info()
 					if($row ne "")
 					{
 						my ($string_name, $ext) = split(/\.ogp/, $mod_info_file);
-						push @mods_info, "$string_name:$row";
+						if(index($row, "\t") >= 0)
+						{
+							push @mods_info, $row;
+						}
+						else
+						{
+							push @mods_info, "$string_name:$row";
+						}
 					}
 					close($fh);
 				}

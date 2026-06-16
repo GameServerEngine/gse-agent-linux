@@ -32,6 +32,8 @@ sudo bash agent_conf.sh -s "root-password" -u ogp_agent
 | `listen_port` | TCP port exposed to the panel. Default is `12679`. |
 | `key` | Shared secret copied from the panel → Administration → Game Servers. |
 | `web_api_url` | HTTPS URL to `ogp_api.php` on the panel. |
+| `agent_event_url` | HTTPS URL to `agent_event_receiver.php` on the panel for lifecycle activity-log events. |
+| `remote_server_id` | Panel remote server ID for this agent. Required for signed lifecycle event delivery. |
 | `stats_db_*` | Optional MySQL credentials for the resource stats cron. |
 
 ## Service management
@@ -81,6 +83,8 @@ Stop escalation now verifies all of the following are cleared before success:
 3. listening game port
 
 Lifecycle control no longer uses game-home `SERVER_STOPPED` marker files.
+
+See `docs/AGENT_ACTIVITY_EVENTS.md` for Panel activity-log event delivery, offline queue behavior, and troubleshooting.
 Explicit stop intent and autorestart suppression are now controlled through agent-owned runtime status hints (`STOPPING`/`STOPPED`) and verified runtime checks.
 
 Restart remains stop-first and waits 60 seconds, then re-verifies stop completion before starting again to avoid duplicate instances.

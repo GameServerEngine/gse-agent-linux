@@ -227,6 +227,8 @@ then
 	sudo_password => '${sudo_password}',
 	web_admin_api_key => '{your_admin_ogp_web_api_key_here}',
 	web_api_url => '{your_url_to_ogp_api.php}',
+	agent_event_url => '{your_url_to_agent_event_receiver.php}',
+	remote_server_id => '{panel_remote_server_id}',
 	steam_dl_limit => '0',
 	# Resource stats database configuration
 	stats_db_host => '${stats_db_host}',
