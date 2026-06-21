@@ -1,0 +1,20 @@
+# GSP Linux Agent systemd service
+
+[Unit]
+Description=GameServer Panel Linux Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={GSP_AGENT_USER}
+Group={GSP_AGENT_USER}
+WorkingDirectory={GSP_AGENT_PATH}
+ExecStart={GSP_AGENT_RUN_SCRIPT} -pidfile {GSP_AGENT_PID_FILE}
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

@@ -4,7 +4,7 @@ The Linux agent can report meaningful server lifecycle events to the GSP Panel a
 
 ## Configuration
 
-Set these values in `Cfg/Config.pm`:
+Set these values in `Cfg/Config.pm` under the selected install directory:
 
 ```perl
 agent_event_url => 'https://panel.example.com/agent_event_receiver.php',
@@ -12,6 +12,12 @@ remote_server_id => '1',
 ```
 
 If `agent_event_url` is empty, the agent attempts to derive it from `web_api_url`. The `key` value must match the Panel remote server encryption key because it is used to sign event payloads.
+
+Default new install path:
+
+```text
+/home/gameserver/GSP/Cfg/Config.pm
+```
 
 ## Authentication
 

@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+AGENTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGENT="${AGENTDIR}/ogp_agent.pl"
+PID_FILE=""
+TIMEOUT=10
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-pidfile)
+			PID_FILE="${2:-}"
+			shift 2
+			;;
+		*)
+			shift
+			;;
+	esac
+done
+
+mkdir -p "${AGENTDIR}/logs" "${AGENTDIR}/screenlogs" "${AGENTDIR}/tmp" "${AGENTDIR}/_gsp_content/hooks" "${AGENTDIR}/_gsp_content/generated" "${AGENTDIR}/_gsp_content/runtime"
+touch "${AGENTDIR}/_gsp_content/runtime/server_content.pids" 2>/dev/null || true
+
+if [ "$(id -u)" -eq 0 ]; then
+	echo "ERROR: Do not run the GSP agent as root. Run it as the configured agent user." >&2
+	exit 1
+fi
+
+if [ ! -f "${AGENTDIR}/Cfg/Config.pm" ]; then
+	echo "ERROR: Missing ${AGENTDIR}/Cfg/Config.pm. Run ./agent_conf.sh --guided." >&2
+	exit 1
+fi
+
+if grep -Eq "CHANGE_ME_PANEL_AGENT_KEY|key[[:space:]]*=>[[:space:]]*''" "${AGENTDIR}/Cfg/Config.pm"; then
+	echo "ERROR: ${AGENTDIR}/Cfg/Config.pm still has a placeholder agent key." >&2
+	exit 1
+fi
+
+if [ ! -x "$AGENT" ]; then
+	chmod ug+x "$AGENT" 2>/dev/null || true
+fi
+
+if [ -n "$PID_FILE" ]; then
+	echo "$$" > "$PID_FILE"
+fi
+
+cd "$AGENTDIR"
+
+while true; do
+	perl "$AGENT" "$@" || rc=$?
+	rc="${rc:-0}"
+	if [ "$rc" -eq 0 ]; then
+		echo "$(date): GSP Agent stopped cleanly"
+		exit 0
+	fi
+	echo "$(date): GSP Agent exited with status ${rc}; restarting in ${TIMEOUT}s" >&2
+	sleep "$TIMEOUT"
+	unset rc
+done

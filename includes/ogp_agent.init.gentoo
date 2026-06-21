@@ -12,14 +12,13 @@ depend() {
 }
 
 start() {
-	ebegin "Starting OGP Agent"
-        start-stop-daemon --verbose --chdir $agent_dir --start --background --user $agent_user -e PWD="$agent_dir" --exec screen -d -m -t ogp_agent -c ogp_screenrc -S ogp_agent ./ogp_agent_run -pidfile ogp_agent_run.pid
-        eend $? "Failed to start OGP Agent"
+	ebegin "Starting GSP Agent"
+        start-stop-daemon --verbose --chdir $agent_dir --start --background --user $agent_user -e PWD="$agent_dir" --exec screen -d -m -t gsp_agent -c ogp_screenrc -S gsp_agent ./gsp_agent_run -pidfile gsp_agent_run.pid
+        eend $? "Failed to start GSP Agent"
 }
 
 stop() {
-	ebegin "Stopping OGP Agent"
-	start-stop-daemon --stop --quiet --pidfile $agent_dir/ogp_agent_run.pid
-	eend $? "Failed to stop OGP Agent"
+	ebegin "Stopping GSP Agent"
+	start-stop-daemon --stop --quiet --pidfile $agent_dir/gsp_agent_run.pid
+	eend $? "Failed to stop GSP Agent"
 }
-

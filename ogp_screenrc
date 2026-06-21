@@ -4,5 +4,4 @@ hardstatus alwayslastline '%{gk}[ %{G}%H %{g}][%= %{wk}%?%-Lw%?%{=b kR}[%{W}%n%f
 # Default scroll back 100
 defscrollback 100
 deflog on
-logfile /home/gameserver/OGP/screenlogs/screenlog.%t
-
+logfile $PWD/screenlogs/screenlog.%t

@@ -7,16 +7,16 @@ agent_user=OGP_USER
 
 # Start function.
 start() {
-    echo "Starting OGP Agent..."
+    echo "Starting GSP Agent..."
     cd $agent_dir
-    su -c "screen -d -m -t ogp_agent -c ogp_screenrc -S ogp_agent ./ogp_agent_run -pidfile ogp_agent_run.pid" $agent_user &> $agent_dir/ogp_agent.svc &
+    su -c "screen -d -m -t gsp_agent -c ogp_screenrc -S gsp_agent ./gsp_agent_run -pidfile gsp_agent_run.pid" $agent_user &> $agent_dir/gsp_agent.svc &
     echo
 }
 
 # Stop function.
 stop() {
-    echo "Stopping OGP Agent..."
-    kill `cat $agent_dir/ogp_agent_run.pid`
+    echo "Stopping GSP Agent..."
+    kill `cat $agent_dir/gsp_agent_run.pid`
 }
 
 restart() {
@@ -35,7 +35,7 @@ case $1 in
     restart
     ;;
     *)
-    echo "Usage: ogp_agent {start|stop|restart}"
+    echo "Usage: gsp_agent {start|stop|restart}"
     exit 1
     ;;
 esac

@@ -1,351 +1,207 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-#
-# OGP - Open Game Panel
-# Copyright (C) Copyright (C) 2008 - 2013 The OGP Development Team
-#
-# http://www.opengamepanel.org/
-#
-# This program is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License
-# as published by the Free Software Foundation; either version 2
-# of the License, or any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-#
+set -euo pipefail
 
-# Parameters can be passed into the install.sh script to automate OGP updates
-# $1 = Operation Type (Used as opType)
-# $2 = OGP User (Used as ogpAgentUser)
-# $3 = OGP User Sudo Pass (Used as ogpUserPass)
-# $4 = Install Path (Used as ogpInsPath)
+DEFAULT_INSTALL_DIR="/home/gameserver/GSP"
+DEFAULT_AGENT_USER="gameserver"
+DEFAULT_SERVICE_NAME="gsp_agent"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIG_ARGS=("$@")
 
+usage() {
+	cat <<EOF
+GSP Linux Agent guided installer
 
-####################
-#    FUNCTIONs     #
-####################
+Usage: sudo bash install.sh [options]
 
-detectSystemD(){
-	# Ops require sudo
-	initProcessStr=$(ps -p 1 | awk '{print $4}' | tail -n 1)
-	if [ "$initProcessStr" == "systemd" ]; then
-		systemdPresent=1
-		if [ -e "/lib/systemd/system" ]; then
-			SystemDDir="/lib/systemd/system"
-		elif [ -e "/etc/systemd/system" ]; then
-			SystemDDir="/etc/systemd/system"
-		else
-			checkDir=$(ps -eaf|grep '[s]ystemd' | head -n 1 | awk '{print $8}' | grep -o ".*systemd/")
-			if [ -e "${checkDir}system" ]; then
-				SystemDDir="$checkDir"
-			else
-					# Can't find systemd dir
-				systemdPresent=
-				SystemDDir=
-			fi
-		fi
-	fi
+Options:
+  --install-dir PATH       Install directory. Default: ${DEFAULT_INSTALL_DIR}
+  --agent-user USER        Linux user that runs the agent. Default: ${DEFAULT_AGENT_USER}
+  --service-name NAME      systemd service name. Default: ${DEFAULT_SERVICE_NAME}
+  --no-service             Configure files but do not install a systemd service.
+  --no-prereqs            Do not offer to run install_agent_prereqs.sh.
+  --help                  Show this help.
+
+Run install_agent_prereqs.sh first or allow this installer to run it.
+EOF
 }
 
-copySystemDInit(){
-	AGENTDIR=${agent_home}
-	sudoPass=${sudo_password}
-	if [ -e "${AGENTDIR}/systemd/ogp_agent.service" ]; then
-		if [ ! -z "$systemdPresent" ] && [ ! -z "$SystemDDir" ]; then
-			echo -e "systemd detected as the init system with a directory of $SystemDDir.  Updating OGP agent to use systemd service init script."
-			if [ -e "/etc/init.d/ogp_agent" ] && [ ! -e "${AGENTDIR}/ogp_agent_init" ]; then
-				echo -e "Taking care of existing OGP files."
-				echo "$sudoPass" | sudo -S -p "" service ogp_agent stop
-				# Kill any remaining ogp agent process
-				ogpPID=$(ps -ef | grep -v grep | grep ogp_agent.pl | head -n 1 | awk '{print $3}')
-				if [ ! -z "$ogpPID" ]; then
-					echo "$sudoPass" | sudo -S -p "" kill -9 "$ogpPID"
-				fi
-				echo "$sudoPass" | sudo -S -p "" cp "/etc/init.d/ogp_agent" "${AGENTDIR}/ogp_agent_init"
-				echo "$sudoPass" | sudo -S -p "" chmod +x "${AGENTDIR}/ogp_agent_init"
-				echo "$sudoPass" | sudo -S -p "" update-rc.d ogp_agent disable
-				echo "$sudoPass" | sudo -S -p "" chkconfig ogp_agent off
-				echo "$sudoPass" | sudo -S -p "" rm -rf "/etc/init.d/ogp_agent"
-			fi
-			if [ ! -e "$SystemDDir/ogp_agent.service" ]; then
-				echo -e "Copying ogp_agent systemd service file to $SystemDDir"
-				echo "$sudoPass" | sudo -S -p "" cp "${AGENTDIR}/systemd/ogp_agent.service" "$SystemDDir"
-				echo "$sudoPass" | sudo -S -p "" sed -i "s#{OGP_AGENT_PATH}#$AGENTDIR#g" "${SystemDDir}/ogp_agent.service"
-			fi
-		fi
-	fi
+ask() {
+	local prompt="$1"
+	local default_value="$2"
+	local answer
+	read -r -p "${prompt} [${default_value}]: " answer
+	printf '%s' "${answer:-$default_value}"
 }
 
-#####################
-#    CODE  ##########
-#####################
+ask_yes_no() {
+	local prompt="$1"
+	local default_value="$2"
+	local answer
+	while true; do
+		read -r -p "${prompt} [${default_value}]: " answer
+		answer="${answer:-$default_value}"
+		case "$answer" in
+			[yY]|[yY][eE][sS]) return 0 ;;
+			[nN]|[nN][oO]) return 1 ;;
+			*) echo "Enter yes or no." ;;
+		esac
+	done
+}
 
-# Parameter notifications
-if [ ! -z "$1" ]; then
-	echo -n "Received operation type of $1 as a parameter."
-	opType="$1"
-fi
-
-if [ ! -z "$2" ]; then
-	echo -n "Received OGP user of $2 as a parameter."
-	ogpAgentUser="$2"
-fi 
-
-if [ ! -z "$3" ]; then
-	echo -n "Received OGP sudo password of $3 as a parameter."
-	ogpUserPass="$3"
-fi 
-
-if [ ! -z "$4" ]; then
-	echo -n "Received OGP agent path of $4 as a parameter."
-	ogpInsPath="$4"
-fi
-
-failed()
-{
-	echo "ERROR: ${1}"
+fail() {
+	echo "ERROR: $*" >&2
 	exit 1
 }
 
-if [ "X`which screen &> /dev/null;echo $?`" != "X0" ]; then
-    failed "You need to install software called 'screen', before you can install OGP agent.";
-fi
-
-if [ "X`which sed &> /dev/null;echo $?`" != "X0" ]; then
-    failed "You need to install software called 'sed', before you can install OGP agent.";
-fi
-echo
-clear
-echo "#######################################################################"
-echo "# OGP Agent installation and configuration"
-echo "# This program will:"
-echo "# Create ${DEFAULT_AGENT_HOME} or user defined directory"
-echo "# Copy ogp_agent files to ${DEFAULT_AGENT_HOME} or user defined dir"
-echo "# Copy the ogp_agent init script to /etc/init.d or user defined dir"
-echo "# Create an initial configuration file"
-echo "# Thank you for using OGP. http://www.opengamepanel.org/"
-echo "#######################################################################"
-echo 
-
-
-if [ "X`which rsync &> /dev/null;echo $?`" != "X0" ]; then
-    echo "*** WARNING **** missing rsync client. It is not required, but needed to use the rsync game installer";
-fi
-
-if [ "X`whoami`" != "Xroot" ]
-then 
-    echo
-    echo "Detected non-root install..."
-    username=`whoami`
-	echo -n "Enter sudo password: ";
-    read sudo_password;
-else
-    echo "Next you need to type the username of the user that owns the agent homes.";
-    echo "This user must own (have access to) all the game home directories that you"
-    echo "want to run with this agent and must to be in sudoers list so it can perform"
-	echo "administrative tasks.";echo
-    while [ 1 ]
-    do
-		if [ ! -z "$ogpAgentUser" ] ; then
-			username="$ogpAgentUser"
-		else
-			echo -n "Enter user name: ";
-			read username;
-        fi
-		
-		if [ -z "$ogpUserPass" ] ; then
-			echo -n "Enter user password: ";
-			read sudo_password;
-		else
-			sudo_password="$ogpUserPass"
-		fi
-
-        if [ -z "${username}" ]
-        then
-            echo "Username can not be empty.";echo
-            continue;
-        fi
-
-        if [ "Xroot" == "X${username}" ]
-        then
-            echo "'${username}' can not be used as user for agent.";echo
-            continue;
-        fi
-
-        ID_OF_USER=`id -u ${username} 2> /dev/null`
-        if [ $? != 0 ]
-        then
-            echo "User with entered username (${username}) does not exist.";echo
-            continue;
-        fi
-
-        break;
-    done
-fi
-
-detectSystemD
-
-readonly AGENT_USER_HOME="`cat /etc/passwd | grep "^${username}:" | cut -d':' -f6`/OGP/"
-
-echo
-echo "Next the directory for the agent needs to be chosen. The default directory";
-echo "Should be fine in most of the cases."
-echo
-
-if [ -z "$ogpInsPath" ]; then
-	echo "Where do you want to install the agent?"
-	echo -n "[Default is ${AGENT_USER_HOME}]: "
-	read agent_home
-else
-	agent_home="$ogpInsPath"
-fi
-
-if [ -z "${agent_home}" ]  
-then 
-    agent_home=$AGENT_USER_HOME
-fi
-
-# Try to prevent users from doing damage to their systems.
-case ${agent_home} in
-    /bin*|/boot*|/dev*|/etc*|/lib*|/proc*|/root*|/sbin*|/sys*|/)
-        failed "The agent home can not be ${agent_home}";
-        ;;
-esac
-
-echo "Agent install dir is ${agent_home}"
-echo
-agent_home=${agent_home%/}
-
-if [ ! -e ${agent_home} ]
-then 
-    mkdir -p ${agent_home} || failed "Failed to create the directory (${agent_home}) for agent."
-elif [ ! -w ${agent_home} ]
-then
-    failed "You do not have write permissions to the directory you assigned as agent home (${agent_home})."
-fi
-
-if [ "X`whoami`" == "Xroot" ];
-then
-    readonly DEFAULT_INIT_DIR="/etc/init.d/"
-else
-    readonly DEFAULT_INIT_DIR="${agent_home}/"
-fi
-
-if [ -z "$systemdPresent" ]; then
-
-	if [ "X`uname`" != "XLinux" ]
-	then 
-		echo
-		echo "Detected non-Linux platform..."
-		echo "Where do you want to put the init scripts?"
-		echo -n "[Default ${DEFAULT_INIT_DIR}]: "
-		read init_dir
+require_root() {
+	if [ "$(id -u)" -eq 0 ]; then
+		return 0
 	fi
-
-	if [ -z "$opType" ]; then
-		echo "Where do you want to put the init scripts?"
-		echo -n "[Default ${DEFAULT_INIT_DIR}]:"
-		read init_dir
+	if command -v sudo >/dev/null 2>&1; then
+		echo "System service installation requires root. Re-running through sudo..."
+		exec sudo -E bash "$0" "$@"
 	fi
+	fail "Run this installer as root: sudo bash install.sh"
+}
 
-else
-	init_dir=${agent_home}
-fi
+validate_safe_path() {
+	local path="$1"
+	case "$path" in
+		""|"/"|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/lib|/lib/*|/lib64|/lib64/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/sys|/sys/*|/usr|/usr/*|/var|/var/*)
+			fail "Refusing unsafe install directory: $path"
+			;;
+	esac
+}
 
-if [ -z "${init_dir}" ]  
-then 
-    init_dir=${DEFAULT_INIT_DIR}
-fi
-init_dir=${init_dir%/}
-echo "Copying all files and folders to installation directory..."
-# Use rsync if available, otherwise fallback to find/cp
-if command -v rsync >/dev/null 2>&1; then
-	rsync -a --exclude install.sh ./ "${agent_home}/" || failed "Failed to copy files with rsync to ${agent_home}."
-else
-	find . -mindepth 1 -not -name install.sh -exec cp -rf --parents {} "${agent_home}/" \;
-fi
+install_service() {
+	local install_dir="$1"
+	local agent_user="$2"
+	local service_name="$3"
+	local unit_path="/etc/systemd/system/${service_name}.service"
 
-# Create the directory for configs.
-mkdir -p ${agent_home}/Cfg || failed "Failed to create ${agent_home}/Cfg dir."
+	command -v systemctl >/dev/null 2>&1 || {
+		echo "systemd was not detected. Skipping service installation."
+		return 0
+	}
+
+	cp "${install_dir}/systemd/gsp_agent.service" "$unit_path"
+	sed -i \
+		-e "s#{GSP_AGENT_PATH}#${install_dir}#g" \
+		-e "s#{GSP_AGENT_USER}#${agent_user}#g" \
+		-e "s#{GSP_AGENT_RUN_SCRIPT}#${install_dir}/gsp_agent_run#g" \
+		-e "s#{GSP_AGENT_PID_FILE}#${install_dir}/gsp_agent_run.pid#g" \
+		"$unit_path"
+
+	systemctl daemon-reload
+	systemctl enable "$service_name.service"
+	if ask_yes_no "Start ${service_name}.service now?" "yes"; then
+		systemctl restart "$service_name.service"
+	fi
+}
+
+INSTALL_DIR=""
+AGENT_USER=""
+SERVICE_NAME=""
+INSTALL_SERVICE=1
+OFFER_PREREQS=1
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--install-dir) INSTALL_DIR="${2:-}"; shift 2 ;;
+		--agent-user) AGENT_USER="${2:-}"; shift 2 ;;
+		--service-name) SERVICE_NAME="${2:-}"; shift 2 ;;
+		--no-service) INSTALL_SERVICE=0; shift ;;
+		--no-prereqs) OFFER_PREREQS=0; shift ;;
+		--help|-h) usage; exit 0 ;;
+		*) fail "Unknown option: $1" ;;
+	esac
+done
+
+require_root "${ORIG_ARGS[@]}"
+
+echo "GSP Linux Agent installer"
+echo
+echo "This installer configures the Linux execution agent for GameServer Panel."
+echo "Use the same key/password that is configured for this remote server in the Panel."
 echo
 
-if [ -e /etc/gentoo-release ] 
-then
-    echo "Copying ogp_agent.init.gentoo to $init_dir - Gentoo Specific Init"
-    init_file_template='includes/ogp_agent.init.gentoo' 
-elif [ -e /etc/sysconfig ] && [ ! -e /etc/debian_version ]
-then
-    echo "Copying ogp_agent.init.rh to $init_dir - Redhat Style Init (also SuSE, and Mandrake)"
-    init_file_template='includes/ogp_agent.init.rh' 
-elif [ -e /etc/debian_version ]
-then
-    echo "Copying ogp_agent.init.dbn to $init_dir - Debian Style Init"
-    init_file_template='includes/ogp_agent.init.dbn'
-else
-    echo "Copying the generic init script because I don't know what kind of Linux distro this is"
-    init_file_template='includes/ogp_agent.init'
+if [ "$OFFER_PREREQS" -eq 1 ] && [ -x "${SCRIPT_DIR}/install_agent_prereqs.sh" ]; then
+	if ask_yes_no "Run install_agent_prereqs.sh before installing?" "yes"; then
+		bash "${SCRIPT_DIR}/install_agent_prereqs.sh"
+	fi
+elif [ "$OFFER_PREREQS" -eq 1 ]; then
+	echo "Prerequisite installer is not executable. Run: chmod +x install_agent_prereqs.sh && sudo ./install_agent_prereqs.sh"
 fi
 
-init_file=${init_dir}/ogp_agent
+INSTALL_DIR="${INSTALL_DIR:-$(ask "Install directory" "$DEFAULT_INSTALL_DIR")}"
+AGENT_USER="${AGENT_USER:-$(ask "Agent Linux user" "$DEFAULT_AGENT_USER")}"
+SERVICE_NAME="${SERVICE_NAME:-$(ask "systemd service name" "$DEFAULT_SERVICE_NAME")}"
 
-cp -f $init_file_template $init_file || failed "Failed to create init file ($init_file)."
-# Next we replace the OGP_AGENT_DIR with the actual dir in init file.
-sed -i "s|OGP_AGENT_DIR|${agent_home}|" ${init_file} || failed "Failed to modify init file ($init_file)."
-sed -i "s|OGP_USER|${username}|" ${init_file} || failed "Failed to modify init file ($init_file)."
-chmod a+x $init_file
+validate_safe_path "$INSTALL_DIR"
+INSTALL_DIR="${INSTALL_DIR%/}"
 
-if [ "$init_dir" == "$agent_home" ] && [ ! -z "$systemdPresent" ]; then
-	init_file=${init_dir}/ogp_agent_init
-	mv ${init_dir}/ogp_agent ${init_dir}/ogp_agent_init
-	copySystemDInit
+if ! id "$AGENT_USER" >/dev/null 2>&1; then
+	if ask_yes_no "User ${AGENT_USER} does not exist. Create it?" "yes"; then
+		useradd --create-home --shell /bin/bash "$AGENT_USER"
+	else
+		fail "Agent user is required."
+	fi
 fi
 
-echo;
-
-echo "Changing files owner to user ${username}...";
-# Group of the files in agent_home can differ from the user so 
-# lets leave them as they are. So no chown user:group here.
-chown --preserve-root -R ${username} ${agent_home} || failed "Failed to chmod the agent_home ${agent_home} for user ${username}."
-
-echo "Setting Permissions on files in ${agent_home}..."
-if [ -e "${init_dir}/ogp_agent" ]; then
-	chmod 750 ${init_dir}/ogp_agent || failed "Failed to chmod ${init_dir}/ogp_agent to 750."
-fi
-if [ -e "${init_dir}/ogp_agent_init" ]; then
-	chmod 750 ${init_dir}/ogp_agent_init || failed "Failed to chmod ${init_dir}/ogp_agent_init to 750."
-fi
-chmod 750 ${agent_home}/ogp_agent.pl || failed "Failed to chmod ${agent_home}/ogp_agent.pl to 750."
-chmod 750 ${agent_home}/ogp_agent_run || failed "Failed to chmod ${agent_home}/ogp_agent_run to 750."
-
-echo "Install Successful!"
-echo "Now configuring..."
-echo ""
-
-# Run the configuration script
-chmod +x ${agent_home}/agent_conf.sh
-
-if [ -z "$opType" ]; then
-	bash ${agent_home}/agent_conf.sh -s $sudo_password -u $username
+mkdir -p "$INSTALL_DIR"
+if [ "$SCRIPT_DIR" != "$INSTALL_DIR" ]; then
+	rsync -a --exclude='.git/' --exclude='Cfg/Config.pm' --exclude='Cfg/Preferences.pm' --exclude='Cfg/bash_prefs.cfg' "${SCRIPT_DIR}/" "${INSTALL_DIR}/"
 fi
 
-echo "Attempting to start the Open Game Panel (OGP) agent..."  
+mkdir -p \
+	"${INSTALL_DIR}/Cfg" \
+	"${INSTALL_DIR}/logs" \
+	"${INSTALL_DIR}/tmp" \
+	"${INSTALL_DIR}/screenlogs" \
+	"${INSTALL_DIR}/runtime_status" \
+	"${INSTALL_DIR}/events" \
+	"${INSTALL_DIR}/_gsp_content/hooks" \
+	"${INSTALL_DIR}/_gsp_content/generated" \
+	"${INSTALL_DIR}/_gsp_content/runtime"
 
-systemctl daemon-reload
-chkconfig ogp_agent on
-rc-update add ogp_agent default
-update-rc.d ogp_agent defaults
-systemctl enable ogp_agent.service
-service ogp_agent restart
+touch "${INSTALL_DIR}/_gsp_content/runtime/server_content.pids"
 
-echo;
-echo "OGP installation complete!"  
-echo 
+chmod +x "${INSTALL_DIR}/gsp_agent_run" "${INSTALL_DIR}/ogp_agent_run" "${INSTALL_DIR}/agent_conf.sh" "${INSTALL_DIR}/install_agent_prereqs.sh" 2>/dev/null || true
+chown -R "${AGENT_USER}:${AGENT_USER}" "$INSTALL_DIR"
 
-exit 0
+echo
+echo "Configuring agent files..."
+bash "${INSTALL_DIR}/agent_conf.sh" \
+	--install-dir "$INSTALL_DIR" \
+	--agent-user "$AGENT_USER" \
+	--guided
+
+if [ "$INSTALL_SERVICE" -eq 1 ]; then
+	install_service "$INSTALL_DIR" "$AGENT_USER" "$SERVICE_NAME"
+fi
+
+cat <<EOF
+
+GSP Linux Agent installation complete.
+
+Config files:
+  ${INSTALL_DIR}/Cfg/Config.pm
+  ${INSTALL_DIR}/Cfg/Preferences.pm
+  ${INSTALL_DIR}/Cfg/bash_prefs.cfg
+
+Logs:
+  ${INSTALL_DIR}/gsp_agent.log
+  ${INSTALL_DIR}/screenlogs/
+
+Useful commands:
+  sudo systemctl status ${SERVICE_NAME}
+  sudo journalctl -u ${SERVICE_NAME} -f
+  tail -f ${INSTALL_DIR}/gsp_agent.log
+
+Panel configuration still required:
+  1. Add or edit the remote server in the GSP Panel.
+  2. Use listen IP/port from Config.pm.
+  3. Use the same agent key/shared secret from Config.pm.
+  4. Open the configured agent port in the firewall.
+EOF

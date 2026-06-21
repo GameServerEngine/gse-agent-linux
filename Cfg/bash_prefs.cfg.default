@@ -1,0 +1,8 @@
+agent_auto_update=0
+agent_update_repo_url=http://forge.runlevelsystems.com/dev/GSP.git
+agent_update_branch=Panel-unstable
+agent_update_raw_url=http://forge.runlevelsystems.com/dev/GSP/raw/branch/Panel-unstable/Agent-Linux/ogp_agent.pl
+run_pureftpd=1
+ftp_port=21
+ftp_ip=0.0.0.0
+ftp_pasv_range=

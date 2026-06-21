@@ -1,734 +1,218 @@
-#!/bin/bash
-#
-# OGP - Open Game Panel
-# Copyright (C) Copyright (C) 2008 - 2013 The OGP Development Team
-#
-# http://www.opengamepanel.org/
-#
-# This program is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License
-# as published by the Free Software Foundation; either version 2
-# of the License, or any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-#
+#!/usr/bin/env bash
 
-####################
-#    FUNCTIONs     #
-####################
+set -euo pipefail
 
-function indexOf(){ 
-	# $1 = search string
-	# $2 = string or char to find
-	# Returns -1 if not found
-	x="${1%%$2*}"
-	[[ $x = $1 ]] && echo -1 || echo ${#x}
-}
+DEFAULT_PORT="12679"
+DEFAULT_IP="0.0.0.0"
+DEFAULT_AGENT_VERSION="v1.4"
+DEFAULT_FTP_METHOD="PureFTPd"
+DEFAULT_FTP_PORT="21"
+DEFAULT_FTP_PASV_RANGE=""
 
-#####################
-#    CODE  ##########
-#####################
+usage() {
+	cat <<EOF
+GSP Linux Agent configuration helper
 
-if [ $EUID -ne 0 -a "$(uname -o)" != "Cygwin" ]; then
-   echo "This script must be run as root" 1>&2
-   exit 1
-fi
+Usage:
+  ./agent_conf.sh --guided
+  ./agent_conf.sh [options]
 
-usage()
-{
-cat << EOF
+Options:
+  --install-dir PATH          Agent install directory. Default: directory containing this script.
+  --agent-user USER           Owner for generated config files.
+  --key VALUE                 Agent key/shared secret from the GSP Panel remote-server record.
+  --listen-ip IP              Agent bind IP. Default: ${DEFAULT_IP}
+  --listen-port PORT          Agent bind port. Default: ${DEFAULT_PORT}
+  --sudo-password VALUE       Optional sudo password for legacy sudo_exec flows.
+  --web-api-url URL           Panel ogp_api.php URL.
+  --agent-event-url URL       Panel agent_event_receiver.php URL.
+  --remote-server-id ID       Panel remote server ID.
+  --ftp-managed 0|1           Whether GSP should manage FTP accounts. Default: 1
+  --ftp-method NAME           FTP backend. Default: ${DEFAULT_FTP_METHOD}
+  --auto-restart 0|1          Restart crashed game servers. Default: 1
+  --auto-update 0|1           Restart-time agent auto update. Default: 0
+  --guided                    Prompt for missing values.
+  --help                      Show this help.
 
-Usage: $0 option
+Legacy aliases:
+  -s VALUE maps to --sudo-password
+  -u USER  maps to --agent-user
 
-OPTIONS:
-   -s password       Set the password for the agent's user (Linux)
-   -p password       Set the password for cyg_server user (Windows)
-   -u ogpuser        Set the username of the ogp user
+This script writes:
+  Cfg/Config.pm
+  Cfg/Preferences.pm
+  Cfg/bash_prefs.cfg
 EOF
 }
 
-while getopts "hs:p:u" OPTION
-do
-     case $OPTION in
-         s)
-             sudo_password=$OPTARG
-             ;;
-         p)
-             cs_psw=$OPTARG
-             ;;
-		 u)
-             agent_user=$OPTARG
-             ;;
-            
-         ?)
-             exit
-             ;;
-     esac
-done
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+install_dir="$script_dir"
+agent_user=""
+guided=0
+key=""
+listen_ip="$DEFAULT_IP"
+listen_port="$DEFAULT_PORT"
+sudo_password=""
+web_api_url=""
+agent_event_url=""
+remote_server_id=""
+steam_license="Accept"
+ftp_managed="1"
+ftp_method="$DEFAULT_FTP_METHOD"
+auto_restart="1"
+auto_update="0"
+screen_log_local="1"
+delete_logs_after="30"
+linux_user_per_game_server="1"
+protocol_shutdown_waittime="10"
+ftp_port="$DEFAULT_FTP_PORT"
+ftp_ip="$DEFAULT_IP"
+ftp_pasv_range="$DEFAULT_FTP_PASV_RANGE"
 
-if [ -z $1 ]
-then
-   usage
-   exit
-fi
-
-if [ "$(uname -o)" == "Cygwin" ]; then
-   if [ -z $cs_psw ]
-   then
-      echo "Must use -p argument instead of -s."
-      exit
-   fi
-else
-   if [ -z $sudo_password ]
-   then
-      echo "Must use -s argument instead of -p."
-      exit
-   fi
-fi
-
-readonly DEFAULT_PORT=12679
-readonly DEFAULT_IP=0.0.0.0
-readonly DEFAULT_FTP_PORT=21
-readonly DEFAULT_FTP_PASV_RANGE=40000:50000
-readonly AGENT_VERSION='v1.4'
-
-failed()
-{
-	echo "ERROR: ${1}"
-	exit 1
+ask() {
+	local prompt="$1"
+	local default_value="$2"
+	local answer
+	read -r -p "${prompt} [${default_value}]: " answer
+	printf '%s' "${answer:-$default_value}"
 }
 
-agent_home="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )" 
+ask_secret() {
+	local prompt="$1"
+	local answer
+	read -r -s -p "${prompt}: " answer
+	echo
+	printf '%s' "$answer"
+}
 
-cfgfile=${agent_home}/Cfg/Config.pm
-prefsfile=${agent_home}/Cfg/Preferences.pm
-bashprefsfile=${agent_home}/Cfg/bash_prefs.cfg
+require_01() {
+	local name="$1"
+	local value="$2"
+	[[ "$value" =~ ^[01]$ ]] || {
+		echo "ERROR: ${name} must be 0 or 1." >&2
+		exit 1
+	}
+}
 
-overwrite_config=1
-if [ -e ${cfgfile} ]; then
-	while [ 1 ]
-	do
-		echo "Overwrite old configuration?"
-		echo -n "(yes/no) [Default yes]: " 
-		read octmp
-		if [ "$octmp" == "yes" -o -z "$octmp" ]
-		then
-			break
-		elif [ "$octmp" == "no" ]
-		then
-			overwrite_config=0
-			break
-		else
-			echo "You need to type 'yes', 'no' or leave empty for default value [yes]."
-		fi
-	done
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--install-dir) install_dir="${2:-}"; shift 2 ;;
+		--agent-user) agent_user="${2:-}"; shift 2 ;;
+		--key) key="${2:-}"; shift 2 ;;
+		--listen-ip) listen_ip="${2:-}"; shift 2 ;;
+		--listen-port) listen_port="${2:-}"; shift 2 ;;
+		--sudo-password) sudo_password="${2:-}"; shift 2 ;;
+		--web-api-url) web_api_url="${2:-}"; shift 2 ;;
+		--agent-event-url) agent_event_url="${2:-}"; shift 2 ;;
+		--remote-server-id) remote_server_id="${2:-}"; shift 2 ;;
+		--ftp-managed) ftp_managed="${2:-}"; shift 2 ;;
+		--ftp-method) ftp_method="${2:-}"; shift 2 ;;
+		--auto-restart) auto_restart="${2:-}"; shift 2 ;;
+		--auto-update) auto_update="${2:-}"; shift 2 ;;
+		--guided) guided=1; shift ;;
+		-s) sudo_password="${2:-}"; shift 2 ;;
+		-u) agent_user="${2:-}"; shift 2 ;;
+		--help|-h) usage; exit 0 ;;
+		*) echo "ERROR: unknown option: $1" >&2; usage; exit 1 ;;
+	esac
+done
+
+install_dir="${install_dir%/}"
+cfg_dir="${install_dir}/Cfg"
+cfgfile="${cfg_dir}/Config.pm"
+prefsfile="${cfg_dir}/Preferences.pm"
+bashprefsfile="${cfg_dir}/bash_prefs.cfg"
+
+if [ "$guided" -eq 1 ]; then
+	echo "GSP Linux Agent configuration"
+	echo "Use values from Panel -> Administration -> Game Servers for this remote server."
+	echo
+	key="${key:-$(ask_secret "Agent key/shared secret")}"
+	listen_ip="$(ask "Listen IP" "$listen_ip")"
+	listen_port="$(ask "Listen port" "$listen_port")"
+	web_api_url="$(ask "Panel API URL, usually https://panel.example.com/ogp_api.php" "$web_api_url")"
+	agent_event_url="$(ask "Panel event receiver URL, usually https://panel.example.com/agent_event_receiver.php" "$agent_event_url")"
+	remote_server_id="$(ask "Panel remote server ID" "$remote_server_id")"
+	ftp_managed="$(ask "Manage FTP accounts? 1=yes, 0=no" "$ftp_managed")"
+	ftp_method="$(ask "FTP method" "$ftp_method")"
+	auto_restart="$(ask "Restart crashed game servers? 1=yes, 0=no" "$auto_restart")"
+	auto_update="$(ask "Restart-time agent auto-update? 1=yes, 0=no" "$auto_update")"
+	if [ -z "$sudo_password" ]; then
+		sudo_password="$(ask_secret "Optional sudo password for legacy sudo_exec flows, leave blank if not used")"
+	fi
 fi
 
-if [ "X${overwrite_config}" == "X1" ]
-then
-	if [ -z "$sudo_password" ]; then
-		if [ -f "$cfgfile" ]; then
-			sudo_password=`awk '/sudo_password/{print $3}' $cfgfile|sed -e "s#\('\)\(.*\)\(',\)#\2#"`
-		fi
-	fi
-	echo "#######################################################################"
-	echo ""
-	echo "OGP agent uses basic encryption to prevent unauthorized users from connecting"
-	echo "Enter a string of alpha-numeric characters for example 'abcd12345'"
-	echo "**** NOTE - Use the same key in your Open Game Panel webpage config file - they must match *****"
-	echo ""
+[ -n "$key" ] || key="CHANGE_ME_PANEL_AGENT_KEY"
+[[ "$listen_port" =~ ^[0-9]+$ ]] || {
+	echo "ERROR: listen port must be numeric." >&2
+	exit 1
+}
+require_01 "ftp-managed" "$ftp_managed"
+require_01 "auto-restart" "$auto_restart"
+require_01 "auto-update" "$auto_update"
 
-	while [ -z "${key}" ]
-	do 
-		echo -n "Set encryption key: "
-		read key
-	done
+mkdir -p "$cfg_dir" "${install_dir}/logs" "${install_dir}/tmp" "${install_dir}/screenlogs" "${install_dir}/_gsp_content/hooks" "${install_dir}/_gsp_content/generated" "${install_dir}/_gsp_content/runtime"
 
-	echo
-	echo "Set the listen port for the agent. The default should be fine for everyone."
-	echo "However, if you want to change it that can be done here, otherwise just press Enter."
-	echo -n "Set listen port [Default ${DEFAULT_PORT}]: "
-	read port
-
-	if [ -z "${port}" ]
-	then 
-		port=$DEFAULT_PORT
-	fi
-
-	echo 
-	echo "Set the listen IP for the agent."
-	echo "Use ${DEFAULT_IP} to bind on all interfaces."
-	echo -n "Set listen IP [Default ${DEFAULT_IP}]: "
-	read ip
-
-	if [ -z "${ip}" ]  
-	then 
-		ip=$DEFAULT_IP
-	fi 
-
-	while [ 1 ]
-	do
-		echo
-		echo "For some games the OGP panel is using Steam client."
-		echo "This client has its own license that you need to agree before continuing."
-		echo "This agreement is available at http://store.steampowered.com/subscriber_agreement/"
-		echo;
-		echo "Do you accept the terms of Steam(tm) Subscriber Agreement?"
-		echo -n "(Accept|Reject): "
-		read steam_license
-		
-		if [ "$steam_license" == "Accept" -o "$steam_license" == "Reject" ]
-		then	 
-			break;
-		fi
-		
-		echo "You need to type either 'Accept' or 'Reject'."
-	done
-
-	echo "Writing Config file - $cfgfile"
-
-
-	# Prompt for resource stats MySQL settings
-	echo
-	echo "Configure Resource Stats MySQL Database Connection:"
-	echo -n "Stats DB Host [Default 127.0.0.1]: "
-	read stats_db_host
-	if [ -z "$stats_db_host" ]; then stats_db_host='127.0.0.1'; fi
-	echo -n "Stats DB User [Default panel_user]: "
-	read stats_db_user
-	if [ -z "$stats_db_user" ]; then stats_db_user='panel_user'; fi
-	echo -n "Stats DB Password [Default REPLACE_ME]: "
-	read stats_db_pass
-	if [ -z "$stats_db_pass" ]; then stats_db_pass='REPLACE_ME'; fi
-	echo -n "Stats DB Name [Default panel_database]: "
-	read stats_db_name
-	if [ -z "$stats_db_name" ]; then stats_db_name='panel_database'; fi
-	echo -n "Stats Table Prefix [Default gsp_]: "
-	read stats_table_prefix
-	if [ -z "$stats_table_prefix" ]; then stats_table_prefix='gsp_'; fi
-	echo -n "Stats Frequency Minutes [Default 5]: "
-	read stats_frequency_minutes
-	if [ -z "$stats_frequency_minutes" ]; then stats_frequency_minutes='5'; fi
-
-	echo "%Cfg::Config = (
-	logfile => '${agent_home}/ogp_agent.log',
-	listen_port  => '${port}',
-	listen_ip => '${ip}',
-	version => '${AGENT_VERSION}',
+cat > "$cfgfile" <<EOF
+%Cfg::Config = (
+	logfile => '${install_dir}/gsp_agent.log',
+	listen_port => '${listen_port}',
+	listen_ip => '${listen_ip}',
+	version => '${DEFAULT_AGENT_VERSION}',
 	key => '${key}',
 	steam_license => '${steam_license}',
 	sudo_password => '${sudo_password}',
-	web_admin_api_key => '{your_admin_ogp_web_api_key_here}',
-	web_api_url => '{your_url_to_ogp_api.php}',
-	agent_event_url => '{your_url_to_agent_event_receiver.php}',
-	remote_server_id => '{panel_remote_server_id}',
+	web_admin_api_key => '',
+	web_api_url => '${web_api_url}',
+	agent_event_url => '${agent_event_url}',
+	remote_server_id => '${remote_server_id}',
 	steam_dl_limit => '0',
-	# Resource stats database configuration
-	stats_db_host => '${stats_db_host}',
-	stats_db_user => '${stats_db_user}',
-	stats_db_pass => '${stats_db_pass}',
-	stats_db_name => '${stats_db_name}',
-	stats_table_prefix => '${stats_table_prefix}',
-	stats_frequency_minutes => '${stats_frequency_minutes}',
-	);" > $cfgfile
-	
-	if [ $? != 0 ]
-	then
-		failed "Failed to write config file."
-	else
-		chmod 600 ${cfgfile} || failed "Failed to chmod ${cfgfile} to 600."
-	fi 
+	stats_db_host => '',
+	stats_db_user => '',
+	stats_db_pass => '',
+	stats_db_name => '',
+	stats_table_prefix => 'gsp_',
+	stats_frequency_minutes => '5',
+);
+EOF
 
-	echo;
-	while [ 1 ]
-	do
-		echo "The agent should be updated when the service is restarted or started?"
-		echo -n "(yes|no) [Default yes]: "
-		read auto_update
-		if [ "${auto_update}" == "yes" -o "${auto_update}" == "no" -o -z "${auto_update}" ]
-		then 
-			if [ "${auto_update}" == "yes" ]
-			then
-				autoUpdate=1
-			elif [ -z "${auto_update}" ]
-			then
-				autoUpdate=1
-			else
-				autoUpdate=0
-			fi
-			break;
-		fi
-		echo "You need to type 'yes', 'no' or leave empty for default value [yes]."
-	done
+cat > "$prefsfile" <<EOF
+%Cfg::Preferences = (
+	screen_log_local => '${screen_log_local}',
+	delete_logs_after => '${delete_logs_after}',
+	gsp_manages_ftp => '${ftp_managed}',
+	ogp_manages_ftp => '${ftp_managed}',
+	ftp_method => '${ftp_method}',
+	gsp_autorestart_server => '${auto_restart}',
+	ogp_autorestart_server => '${auto_restart}',
+	protocol_shutdown_waittime => '${protocol_shutdown_waittime}',
+	linux_user_per_game_server => '${linux_user_per_game_server}',
+	PortValidationEnabled => '1',
+	StartupValidationTimeoutSeconds => '180',
+	PortCheckIntervalSeconds => '5',
+);
+EOF
 
-	echo;
-	while [ 1 ]
-	do
-		echo "The agent should backup the server log files in the game server directory?"
-		echo -n "(yes|no) [Default yes]: "
-		read log_local_copy
-		if [ "${log_local_copy}" == "yes" -o "${log_local_copy}" == "no" -o -z "${log_local_copy}" ]
-		then 
-			if [ "${log_local_copy}" == "yes" ]
-			then
-				logLocalCopy=1
-			elif [ -z "${log_local_copy}" ]
-			then
-				logLocalCopy=1
-			else
-				logLocalCopy=0
-			fi
-			break;
-		fi
-		echo "You need to type 'yes', 'no' or leave empty for default value [yes]."
-	done
+cat > "$bashprefsfile" <<EOF
+agent_auto_update=${auto_update}
+agent_update_repo_url=http://forge.runlevelsystems.com/dev/GSP.git
+agent_update_branch=Panel-unstable
+agent_update_raw_url=http://forge.runlevelsystems.com/dev/GSP/raw/branch/Panel-unstable/Agent-Linux/ogp_agent.pl
+run_pureftpd=${ftp_managed}
+ftp_port=${ftp_port}
+ftp_ip=${ftp_ip}
+ftp_pasv_range=${ftp_pasv_range}
+EOF
 
-	echo;
-	echo "After how many days should be deleted the old backups of server's logs?"
-	echo -n "[Default 30]: "
-	read delete_logs_after
-	case ${delete_logs_after} in
-		''|*[!0-9]*) deleteLogsAfter=30 ;;
-		*) deleteLogsAfter=${delete_logs_after} ;;
-	esac
+chmod 600 "$cfgfile"
+chmod 644 "$prefsfile" "$bashprefsfile"
 
-	echo;
-	while [ 1 ]
-	do
-		echo "The agent should automatically restart game servers if they crash?"
-		echo -n "(yes|no) [Default yes]: "
-		read auto_restart
-		if [ "${auto_restart}" == "yes" -o "${auto_restart}" == "no" -o -z "${auto_restart}" ]
-		then 
-			if [ "${auto_restart}" == "yes" ]
-			then
-				autoRestart=1
-			elif [ -z "${auto_restart}" ]
-			then
-				autoRestart=1
-			else
-				autoRestart=0
-			fi
-			break;
-		fi
-		echo "You need to type 'yes', 'no' or leave empty for default value [yes]."
-	done
-	
-	echo;
-	while [ 1 ]
-	do
-		echo "Should Open Game Panel create and manage FTP accounts?"
-		echo -n "(yes|no) [Default yes]: "
-		read manage_ftp
-		if [ "${manage_ftp}" == "yes" -o "${manage_ftp}" == "no" -o -z "${manage_ftp}" ]
-		then
-			if [ "${manage_ftp}" == "yes" ]
-			then
-				ogpManagesFTP=1
-			elif [ -z "${manage_ftp}" ]
-			then
-				ogpManagesFTP=1
-			else
-				ogpManagesFTP=0
-			fi
-			break;
-		fi
-		echo "You need to type 'yes', 'no' or leave empty for default value [yes]."
-	done
-
-	echo;
-	# Only ask these install questions if users want OGP to manage FTP accounts    
-	if [ "$ogpManagesFTP" == "1" ]
-	then
-		if [ "$(uname -o)" != "Cygwin" ]; then
-			while [ 1 ]
-			do
-				echo "If you are running ISPConfig 3 in this machine the agent"
-				echo "can use it to create FTP accounts instead of using Pure-FTPd."
-				echo "Would you like to configure this agent to use the API of ISPConfig 3?"
-				echo -n "(yes|no) [Default no]: "
-				read IspConfig
-				if [ "${IspConfig}" == "yes" -o "${IspConfig}" == "no" -o -z "${IspConfig}" ]
-				then
-					if [ "${IspConfig}" == "yes" ]
-					then
-						ftpMethod="IspConfig"
-					else
-						IspConfig="no"
-					fi
-					break;
-				fi
-				echo "You need to type 'yes', 'no' or leave empty for default value [no]."
-			done
-			
-			if [ "${IspConfig}" == "yes" ]
-			then
-				while [ 1 ]
-				do
-					echo "Do you use HTTPS to access to your ISPConfig 3 Panel?"
-					echo -n "(yes|no) [Default no]: "
-					read https
-					if [ "${https}" == "yes" -o "${https}" == "no" -o -z "${https}" ]
-					then
-						if [ "${https}" == "yes" ]
-						then
-							secure="s"
-						else
-							secure=""
-						fi
-						break;
-					fi
-					echo "You need to type 'yes', 'no' or leave empty for default value [no]."
-				done
-				
-				echo -n "What port do you use to connect to your ISPConfig 3 Panel? [Default 8080]: "
-				read setport
-				case ${setport} in
-					''|*[!0-9]*) port=8080 ;;
-					*) port=${setport} ;;
-				esac
-				
-				echo -n "Enter an user name to sing in remotelly (Remote user): "
-				read remote_login_username
-
-				echo -n "Enter password (Remote user): "
-				read remote_login_password
-				
-				echo -e "<?php\n\$username = '${remote_login_username}';" > ${agent_home}/IspConfig/soap_config.php
-				echo "\$password = '${remote_login_password}';" >> ${agent_home}/IspConfig/soap_config.php
-				echo "\$soap_location = 'http${secure}://127.0.0.1:${port}/remote/index.php';" >> ${agent_home}/IspConfig/soap_config.php
-				echo -e "\$soap_uri = 'http${secure}://127.0.0.1:${port}/remote/';\n?>" >> ${agent_home}/IspConfig/soap_config.php
-				
-			else
-				while [ 1 ]
-				do
-					echo;
-					echo "If you have installed the Easy Hosting Control Panel (EHCP - www.ehcpforce.tk),"
-					echo "the agent can use it to create FTP accounts instead of using Pure-FTPd."
-					echo "Would you like to configure this agent to use the API of EHCP?"
-					echo -n "(yes|no) [Default no]: "
-					read ehcp
-					if [ "${ehcp}" == "yes" -o "${ehcp}" == "no" -o -z "${ehcp}" ]
-					then 
-						if [ "${ehcp}" == "yes" ]
-						then
-							ftpMethod="EHCP"
-						fi
-						break;
-					fi
-					echo "You need to type 'yes', 'no' or leave empty for default value [no]."
-				done
-				
-				if [ "${ehcp}" == "yes" ]
-				then
-					echo "Please enter the MySQL database password for the ehcp user"
-					echo -n "(created during the install of EHCP): "
-					read ehcpDB
-						
-					ehcpConf=${agent_home}/EHCP/config.php
-					sed -i "s/changeme/${ehcpDB}/" $ehcpConf
-				else
-					while [ 1 ]
-					do
-						echo;
-						echo "The agent can use ProFTPd to create FTP accounts."
-						echo "Would you like to configure this agent to use the ProFTPd?"
-						echo -n "(yes|no) [Default no]: "
-						read proftpd
-						if [ "${proftpd}" == "yes" -o "${proftpd}" == "no" -o -z "${proftpd}" ]
-						then 
-							if [ "${proftpd}" == "yes" ]
-							then
-								ftpMethod="proftpd"
-							fi
-							break;
-						fi
-						echo "You need to type 'yes', 'no' or leave empty for default value [no]."
-					done
-					
-					if [ "${proftpd}" == "yes" ]
-					then
-						echo "Please enter the path for proFTPd configuration file"
-						echo -n "[Default /etc/proftpd/proftpd.conf]: "
-						read proFTPdConfFile
-						if [ -z $proFTPdConfFile ]
-						then
-							proFTPdConfFile="/etc/proftpd/proftpd.conf"
-							if [ ! -e "$proFTPdConfFile" ]; then
-								proFTPdConfFile="/etc/proftpd.conf"
-							fi
-						fi
-						proFTPdConfPath=$(dirname ${proFTPdConfFile})
-						while [ 1 ]
-						do
-							if [ ! -e $proFTPdConfFile ]
-							then
-								echo "The file ${proFTPdConfFile} does not exists,"
-								echo "what you want to do, reenter it or ignore and continue?"
-								echo "If your answer is 'ignore' is meant that you will install proFTPd later."
-								echo -n "(reenter|ignore): "
-								read answer
-								if [ "${answer}" == "reenter" -o "${answer}" == "ignore" ]
-								then 
-									if [ "${answer}" == "reenter" ]
-									then
-										echo "Reenter proFTPd's configuration file path:"
-										read proFTPdConfFile
-										continue
-									elif [ "${answer}" == "ignore" ]
-									then
-										echo "You will need to append this to ${proFTPdConfFile} once you've installed proftpd:"
-										bold=`tput bold`
-										normal=`tput sgr0`
-										echo -e "\n\n${bold}RequireValidShell  off\nAuthUserFile  ${proFTPdConfPath}/ftpd.passwd\nAuthGroupFile ${proFTPdConfPath}/ftpd.group${normal}\n\n"
-										break
-									fi
-								fi
-								echo "You need to type 'reenter' or 'ignore'."
-							else							
-								if egrep -iq "LoadModule\s*mod_auth_file.c" ${proFTPdConfFile}
-								then
-									sed -i "s/\s*#\s*LoadModule\s*mod_auth_file.c/LoadModule  mod_auth_file.c/g" ${proFTPdConfFile}
-								else
-									echo -e "LoadModule  mod_auth_file.c" >> ${proFTPdConfFile}
-								fi
-								
-								if egrep -iq "^\s*AuthOrder.*" ${proFTPdConfFile}
-								then
-									if egrep -iq "^\s*AuthOrder.*mod_auth_file.c" ${proFTPdConfFile}
-									then 
-										false
-									else
-										sed -ri "s/(^\s*AuthOrder.*)/\1 mod_auth_file.c/g" ${proFTPdConfFile}
-									fi
-								else
-									echo -e "AuthOrder  mod_auth_file.c" >> ${proFTPdConfFile}
-								fi	
-
-								if egrep -iq "RequireValidShell.*" ${proFTPdConfFile}
-								then
-									sed -i "s#RequireValidShell.*#RequireValidShell  off#g" ${proFTPdConfFile}
-								else
-									echo -e "RequireValidShell  off" >> ${proFTPdConfFile}
-								fi
-								
-								if egrep -iq "AuthUserFile.*" ${proFTPdConfFile}
-								then
-									sed -i "s#AuthUserFile.*#AuthUserFile  ${proFTPdConfPath}/ftpd.passwd#g" ${proFTPdConfFile}
-								else
-									echo -e "AuthUserFile  "${proFTPdConfPath}"/ftpd.passwd" >> ${proFTPdConfFile}
-								fi
-								
-								if egrep -iq "AuthGroupFile.*" ${proFTPdConfFile}
-								then
-									sed -i "s#AuthGroupFile.*#AuthGroupFile ${proFTPdConfPath}/ftpd.group#g" ${proFTPdConfFile}
-								else
-									echo -e "AuthGroupFile "${proFTPdConfPath}"/ftpd.group" >> ${proFTPdConfFile}
-								fi
-								
-								# Allow global overwrite (http://opengamepanel.org/forum/viewthread.php?thread_id=5202)
-								if egrep -iq "AllowOverwrite.*" ${proFTPdConfFile}
-								then
-									sed -i "s#AllowOverwrite.*#AllowOverwrite yes#g" ${proFTPdConfFile}
-								else
-									echo -e "<Global>\nAllowOverwrite yes\n</Global>" >> ${proFTPdConfFile}
-								fi
-								
-								if [ ! -e "${proFTPdConfPath}/ftpd.group" ] 
-								then
-									touch ${proFTPdConfPath}/ftpd.group
-								fi
-								
-								if [ ! -e "${proFTPdConfPath}/ftpd.passwd" ] 
-								then
-									touch ${proFTPdConfPath}/ftpd.passwd
-								fi
-								ftpd_user=$(grep -oP '^User\s+\K.+' ${proFTPdConfFile})
-								ftpd_group=$(grep -oP '^Group\s+\K.+' ${proFTPdConfFile})
-								if [ -z "$agent_user" ]; then
-									agent_user=$(grep -oP 'agent_user=\K.+' /etc/init.d/ogp_agent)
-								fi
-								if [ ! -z "$ftpd_user" ] && [ ! -z "$ftpd_group" ] && [ ! -z "$agent_user" ]
-								then
-									if [ "$(groups $agent_user|grep $ftpd_group)" == "" ]
-									then
-										usermod -aG $ftpd_group $agent_user
-									fi
-									if [ -e "${proFTPdConfPath}/ftpd.passwd" -a -e "${proFTPdConfPath}/ftpd.group" ]
-									then
-										chmod 640 ${proFTPdConfPath}/ftpd.*
-										chown -f $ftpd_user:$ftpd_group ${proFTPdConfPath}/ftpd.*
-									fi
-								fi
-								break
-							fi
-						done
-						
-						if [ -e "/etc/init.d/proftpd" ]
-						then
-							/etc/init.d/proftpd restart
-						else
-							echo "If proftpd is running, to apply the changes, you must restart the service."
-						fi
-					else
-						ftpMethod="PureFTPd"
-					fi
-				fi
-			fi
-		else
-			if uname -a|grep -q "x86_64"
-			then 
-				FZ="yes"
-			else
-				while [ 1 ]
-				do
-					echo;
-					echo "If you have installed the FileZilla Server,"
-					echo "the agent can use it to create FTP accounts instead of using Pure-FTPd."
-					echo "Would you like to configure this agent to use it?"
-					echo -n "(yes|no) [Default no]: "
-					read FZ
-					if [ "${FZ}" == "yes" -o "${FZ}" == "no" -o -z "${FZ}" ]
-					then
-						break;
-					fi
-					echo "You need to type 'yes', 'no' or leave empty for default value [no].";
-				done
-			fi
-			
-			if [ "${FZ}" == "yes" ]; then
-				ftpMethod="FZ"
-				PF=$(cmd /Q /C echo %PROGRAMFILES\(X86\)% | sed 's/\r$//')
-				if [ "X${PF}" == "X" ];then PF=$(cmd /Q /C echo %PROGRAMFILES% | sed 's/\r$//'); fi
-				echo;
-				echo "Please enter the path for FileZilla server executable file"
-				echo -n "[Default ${PF}\\FileZilla Server\\FileZilla server.exe]: "
-				read -r FZ_EXE
-				if [ -z "${FZ_EXE}" ]
-				then 
-					FZ_EXE="${PF}\\FileZilla Server\\FileZilla server.exe"
-				fi
-				echo;
-				echo "Please enter the path for FileZilla server xml file"
-				echo -n "[Default ${PF}\\FileZilla Server\\FileZilla Server.xml]: "
-				read -r FZ_XML
-				if [ -z "${FZ_XML}" ]
-				then 
-					FZ_XML="${PF}\\FileZilla Server\\FileZilla server.xml"
-				fi
-				FZ_EXE=$(cygpath -u "$FZ_EXE")
-				FZ_XML=$(cygpath -u "$FZ_XML")
-				FZconf=${agent_home}/Cfg/FileZilla.pm
-				echo -e "%Cfg::FileZilla = (\n\tfz_exe => '${FZ_EXE}',\n\tfz_xml => '${FZ_XML}'\n);" > ${FZconf}
-				if [ $? != 0 ]
-				then
-					failed "Failed to write FileZilla configuration file."
-				fi
-				if [ ! -z "$cs_psw" ]; then
-					UD=$(cmd /Q /C echo %USERDOMAIN% | sed 's/\r$//')
-					net stop "FileZilla Server"
-					sc config "FileZilla Server" obj= "${UD}\cyg_server" password= "$cs_psw" type= own
-					net start "FileZilla Server"
-				fi
-			else
-				if uname -a|grep -qv "x86_64"
-				then
-					ftpMethod="PureFTPd"
-					echo;
-					echo "Set the listen IP for the PureFTPd."
-					echo "Default is (${DEFAULT_IP}) to bind on all interfaces."
-					echo -n "Set listen IP [Default ${DEFAULT_IP}]: "
-					read ftp_ip
-
-					if [ -z "${ftp_ip}" ]  
-					then 
-						ftp_ip=$DEFAULT_IP
-					fi
-					
-					echo
-					echo "Set the listen port for PureFTPd. The default should be fine for everyone."
-					echo "However, if you want to change it that can be done here, otherwise just press Enter."
-					echo -n "Set listen port [Default ${DEFAULT_FTP_PORT}]: "
-					read port
-
-					if [ -z "${ftp_port}" ]
-					then 
-						ftp_port=$DEFAULT_FTP_PORT
-					fi
-
-					echo
-					echo "Passive-mode downloads."
-					echo "This is especially useful if the server is behind a firewall."
-					echo -n "Use only ports in the range?(yes|no)[Default no]: "
-					read passive_ftp
-
-					if [ -z "${passive_ftp}" -o "${passive_ftp}" != "yes" ]
-					then 
-						ftp_pasv_range=""
-					else
-						echo "Enter passive ports range separated by colon (<first port>:<last port>)."
-						echo -n "[Default ${DEFAULT_FTP_PASV_RANGE}]: "
-						read ftp_pasv_range
-						if [ -z "${ftp_pasv_range}" ]
-						then 
-							ftp_pasv_range=$DEFAULT_FTP_PASV_RANGE
-						fi
-					fi
-				fi
-			fi
-		fi
-	fi
-	
-	if [ "${ftpMethod}" == "PureFTPd" ]
-	then
-		run_pureftpd=1
-	else
-		run_pureftpd=0
-	fi
-
-	echo "Writing Preferences file - $prefsfile"
-
-	prefs="%Cfg::Preferences = (\n"
-	prefs="${prefs}\tscreen_log_local => '${logLocalCopy}',\n"
-	prefs="${prefs}\tdelete_logs_after => '${deleteLogsAfter}',\n"
-	prefs="${prefs}\togp_manages_ftp => '${ogpManagesFTP}',\n"
-	prefs="${prefs}\tftp_method => '${ftpMethod}',\n"
-	prefs="${prefs}\togp_autorestart_server => '${autoRestart}',\n"
-	prefs="${prefs}\tprotocol_shutdown_waittime => '10',\n"
-	prefs="${prefs}\tlinux_user_per_game_server => '1',\n"
-	if [ "X${proftpd}" == "Xyes" ]
-	then
-		prefs="${prefs}\tproftpd_conf_path => '${proFTPdConfPath}',\n"
-	fi
-	prefs="${prefs});"
-	echo -e $prefs > $prefsfile 
-
-	if [ $? != 0 ]
-	then
-		failed "Failed to write preferences file."
-	fi
-
-	echo "Writing bash script preferences file - $bashprefsfile"
-	
-	echo -e "agent_auto_update=${autoUpdate}\nrun_pureftpd=${run_pureftpd}\nftp_port=${ftp_port}\nftp_ip=${ftp_ip}\nftp_pasv_range=${ftp_pasv_range}" > $bashprefsfile
-	
-	if [ $? != 0 ]
-	then
-		failed "Failed to write MISC configuration file used by bash scripts."
-	fi
-
-	# Ensure all config files are owned by the installation owner
-	if [ -n "$agent_user" ]; then
-		# Ensure agent_user is valid and not root
-		if id "$agent_user" >/dev/null 2>&1 && [ "$agent_user" != "root" ]; then
-			chown "$agent_user" "$cfgfile" "$prefsfile" "$bashprefsfile" 2>/dev/null
-		fi
-	fi
+if [ -n "$agent_user" ] && [ "$(id -u)" -eq 0 ] && id "$agent_user" >/dev/null 2>&1; then
+	chown "$agent_user:$agent_user" "$cfgfile" "$prefsfile" "$bashprefsfile"
 fi
+
+echo "Wrote ${cfgfile}"
+echo "Wrote ${prefsfile}"
+echo "Wrote ${bashprefsfile}"
+echo
+echo "Next: ensure the Panel remote-server record uses listen_ip=${listen_ip}, listen_port=${listen_port}, and the same key."

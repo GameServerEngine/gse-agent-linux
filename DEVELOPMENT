@@ -1,6 +1,5 @@
-OGP Agent NOTES:
+GSP Agent NOTES:
 
 Before committing code it is recommended to execute perltidy:
 
 $ perltidy -b -gnu ogp_agent.pl
-

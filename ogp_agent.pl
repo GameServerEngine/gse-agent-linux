@@ -1,9 +1,8 @@
 #!/usr/bin/perl
 #
-# OGP - Open Game Panel
+# GameServer Panel Linux Agent
+# Forked from the Open Game Panel agent.
 # Copyright (C) 2008 - 2018 The OGP Development Team
-#
-# http://www.opengamepanel.org/
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -125,6 +124,21 @@ GetOptions(
 		   'log-stdout'	 => \$log_std_out
 		  );
 
+sub preference_value
+{
+	my ($primary, $legacy, $default) = @_;
+	return $Cfg::Preferences{$primary} if(defined($Cfg::Preferences{$primary}));
+	return $Cfg::Preferences{$legacy} if(defined($legacy) && defined($Cfg::Preferences{$legacy}));
+	return $default;
+}
+
+sub preference_enabled
+{
+	my ($primary, $legacy, $default) = @_;
+	my $value = preference_value($primary, $legacy, $default);
+	return defined($value) && $value eq "1" ? 1 : 0;
+}
+
 # Starting the agent as root user is not supported anymore.
 if ($< == 0)
 {
@@ -186,6 +200,76 @@ sub agent_event_remote_server_id
 	return $Cfg::Config{remote_server_id} if(defined($Cfg::Config{remote_server_id}) && $Cfg::Config{remote_server_id} =~ /^\d+$/);
 	return $Cfg::Config{agent_remote_server_id} if(defined($Cfg::Config{agent_remote_server_id}) && $Cfg::Config{agent_remote_server_id} =~ /^\d+$/);
 	return "";
+}
+
+sub prepare_server_content_runtime_without_decrypt
+{
+	my ($home_path) = @_;
+	return if(!defined($home_path) || $home_path eq "");
+	foreach my $dir (
+		"$home_path/_gsp_content",
+		"$home_path/_gsp_content/hooks",
+		"$home_path/_gsp_content/generated",
+		"$home_path/_gsp_content/runtime"
+	)
+	{
+		mkpath($dir) if(!-d $dir);
+	}
+	my $pid_file = "$home_path/_gsp_content/runtime/server_content.pids";
+	if(!-e $pid_file && open(my $fh, '>', $pid_file))
+	{
+		close($fh);
+	}
+}
+
+sub cleanup_server_content_pid_group_without_decrypt
+{
+	my ($pid_file, $wanted_role, $as_user) = @_;
+	return if(!-f $pid_file);
+	my @remaining;
+	if(!open(my $in, '<', $pid_file))
+	{
+		logger "Could not read server content PID file $pid_file: $!";
+		return;
+	}
+	while(my $line = <$in>)
+	{
+		chomp($line);
+		my $original = $line;
+		$line =~ s/^\s+|\s+$//g;
+		next if($line eq "");
+		my ($pid) = $line =~ /(?:^|[^\d])(\d{2,})(?:[^\d]|$)/;
+		my $role = ($line =~ /watchdog/i) ? "watchdog" : "app";
+		$role = "main_server" if($line =~ /main[_-]?server/i);
+		if(defined($pid) && $role eq $wanted_role)
+		{
+			logger "Stopping server-content $role PID $pid from $pid_file.";
+			sudo_exec_without_decrypt("kill -TERM $pid >/dev/null 2>&1 || true", $as_user);
+			sleep 1 if($wanted_role eq "watchdog");
+			sudo_exec_without_decrypt("kill -KILL $pid >/dev/null 2>&1 || true", $as_user);
+			next;
+		}
+		push(@remaining, $original) if($role ne "watchdog" && $role ne "app");
+	}
+	close($in);
+	if(open(my $out, '>', $pid_file))
+	{
+		foreach my $line (@remaining)
+		{
+			print $out "$line\n";
+		}
+		close($out);
+	}
+}
+
+sub cleanup_server_content_hooks_without_decrypt
+{
+	my ($home_path, $as_user) = @_;
+	return if(!defined($home_path) || $home_path eq "");
+	prepare_server_content_runtime_without_decrypt($home_path);
+	my $pid_file = "$home_path/_gsp_content/runtime/server_content.pids";
+	cleanup_server_content_pid_group_without_decrypt($pid_file, "watchdog", $as_user);
+	cleanup_server_content_pid_group_without_decrypt($pid_file, "app", $as_user);
 }
 
 sub new_correlation_id
@@ -565,7 +649,7 @@ open(PID, '>', AGENT_PID_FILE)
 print PID "$$\n";
 close(PID);
 
-logger "Open Game Panel - Agent started - "
+logger "GameServer Panel - Agent started - "
   . AGENT_VERSION
   . " - port "
   . AGENT_PORT
@@ -688,7 +772,7 @@ my $d = Frontier::Daemon::OGP::Forking->new(
 			 LocalPort => AGENT_PORT,
 			 LocalAddr => AGENT_IP,
 			 ReuseAddr => '1'
-) or die "Couldn't start OGP Agent: $!";
+) or die "Couldn't start GSP Agent: $!";
 
 sub backup_home_log
 {
@@ -1608,6 +1692,7 @@ sub universal_start_without_decrypt
 	my $cli_bin;
 	my $command;
 	my $run_before_start;
+	prepare_server_content_runtime_without_decrypt($home_path);
 
 	# Replace any OGP variables found in the command line
 	$startup_cmd = replace_OGP_Env_Vars($screen_id, $home_id, $home_path, $startup_cmd, $game_key);
@@ -1621,7 +1706,7 @@ sub universal_start_without_decrypt
 			$command = "taskset -c $cpu wine $server_exe $startup_cmd";
 		}
 
-		if(defined($Cfg::Preferences{ogp_autorestart_server}) &&  $Cfg::Preferences{ogp_autorestart_server} eq "1"){
+		if(preference_enabled('gsp_autorestart_server', 'ogp_autorestart_server', '1')){
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
@@ -1636,7 +1721,7 @@ sub universal_start_without_decrypt
 			$command = "taskset -c $cpu $startup_cmd";
 		}
 
-		if(defined($Cfg::Preferences{ogp_autorestart_server}) &&  $Cfg::Preferences{ogp_autorestart_server} eq "1"){
+		if(preference_enabled('gsp_autorestart_server', 'ogp_autorestart_server', '1')){
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
@@ -1651,7 +1736,7 @@ sub universal_start_without_decrypt
 			$command = "taskset -c $cpu ./$server_exe $startup_cmd";
 		}
 
-		if(defined($Cfg::Preferences{ogp_autorestart_server}) &&  $Cfg::Preferences{ogp_autorestart_server} eq "1"){
+		if(preference_enabled('gsp_autorestart_server', 'ogp_autorestart_server', '1')){
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
@@ -2093,6 +2178,7 @@ sub stop_server_without_decrypt
 
 	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
 	my $as_user = find_user_by_screen_id($screen_id);
+	cleanup_server_content_hooks_without_decrypt($home_path, $as_user);
 
 	if ($control_password !~ /^\s*$/ and $control_protocol ne "")
 	{
@@ -4787,7 +4873,7 @@ sub ftp_mgr
 	$password =~ s/('+)/'\"$1\"'/g;
 	$home_path =~ s/('+)/'\"$1\"'/g;
 
-	if(!defined($Cfg::Preferences{ogp_manages_ftp}) || (defined($Cfg::Preferences{ogp_manages_ftp}) &&  $Cfg::Preferences{ogp_manages_ftp} eq "1")){
+	if(preference_enabled('gsp_manages_ftp', 'ogp_manages_ftp', '1')){
 		if( defined($Cfg::Preferences{ftp_method}) && $Cfg::Preferences{ftp_method} eq "IspConfig")
 		{
 			use constant ISPCONFIG_DIR => Path::Class::Dir->new(AGENT_RUN_DIR, 'IspConfig');
@@ -5487,17 +5573,23 @@ if [ -n "\$POST_UPDATE" ]; then
 fi
 log "copy complete archive=\$ARCHIVE"
 sleep 2
+if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^gsp_agent\\.service'; then
+  systemctl restart gsp_agent.service >> "\$LOG" 2>&1 && exit 0
+fi
 if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^ogp_agent\\.service'; then
   systemctl restart ogp_agent.service >> "\$LOG" 2>&1 && exit 0
 fi
 cd "\$DEST" || exit 0
+if [ -f gsp_agent_run.pid ]; then kill "\$(cat gsp_agent_run.pid)" >/dev/null 2>&1 || true; fi
 if [ -f ogp_agent_run.pid ]; then kill "\$(cat ogp_agent_run.pid)" >/dev/null 2>&1 || true; fi
 if [ -f ogp_agent.pid ]; then kill "\$(cat ogp_agent.pid)" >/dev/null 2>&1 || true; fi
 sleep 2
-if [ -f ogp_agent_run ]; then
-  screen -d -m -t "ogp_agent" -c $screenrc_q -S ogp_agent bash ogp_agent_run -pidfile ogp_agent_run.pid >> "\$LOG" 2>&1 || true
+if [ -f gsp_agent_run ]; then
+  screen -d -m -t "gsp_agent" -c $screenrc_q -S gsp_agent bash gsp_agent_run -pidfile gsp_agent_run.pid >> "\$LOG" 2>&1 || true
+elif [ -f ogp_agent_run ]; then
+  screen -d -m -t "gsp_agent" -c $screenrc_q -S gsp_agent bash ogp_agent_run -pidfile gsp_agent_run.pid >> "\$LOG" 2>&1 || true
 else
-  screen -d -m -t "ogp_agent" -c $screenrc_q -S ogp_agent perl ogp_agent.pl >> "\$LOG" 2>&1 || true
+  screen -d -m -t "gsp_agent" -c $screenrc_q -S gsp_agent perl ogp_agent.pl >> "\$LOG" 2>&1 || true
 fi
 log "restart attempted"
 rm -rf "\$TMP"
@@ -5528,9 +5620,10 @@ sub agent_restart
 	if ($dec_check eq 'restart')
 	{
 		chdir AGENT_RUN_DIR;
-		if(-e "ogp_agent_run.pid")
+		if(-e "gsp_agent_run.pid" || -e "ogp_agent_run.pid")
 		{
-			my $init_pid	= `cat ogp_agent_run.pid`;
+			my $run_pid_file = -e "gsp_agent_run.pid" ? "gsp_agent_run.pid" : "ogp_agent_run.pid";
+			my $init_pid	= `cat $run_pid_file`;
 			chomp($init_pid);
 
 			if(kill 0, $init_pid)
@@ -5549,13 +5642,13 @@ sub agent_restart
 				}
 
 				open (AGENT_RESTART_SCRIPT, '>', 'tmp_restart.sh');
-				my $restart = "echo -n \"Stopping OGP Agent...\"\n".
+				my $restart = "echo -n \"Stopping GSP Agent...\"\n".
 							  "kill $init_pid\n".
 							  "while [ -e /proc/$init_pid $or_exist ];do echo -n .;sleep 1;done\n".
-							  "rm -f ogp_agent_run.pid $rm_pid_file\necho \" [OK]\"\n".
-							  "echo -n \"Starting OGP Agent...\"\n".
-							  "screen -d -m -t \"ogp_agent\" -c \"" . SCREENRC_FILE . "\" -S ogp_agent bash ogp_agent_run -pidfile ogp_agent_run.pid\n".
-							  "while [ ! -e ogp_agent_run.pid -o ! -e ogp_agent.pid ];do echo -n .;sleep 1;done\n".
+							  "rm -f gsp_agent_run.pid ogp_agent_run.pid $rm_pid_file\necho \" [OK]\"\n".
+							  "echo -n \"Starting GSP Agent...\"\n".
+							  "screen -d -m -t \"gsp_agent\" -c \"" . SCREENRC_FILE . "\" -S gsp_agent bash gsp_agent_run -pidfile gsp_agent_run.pid\n".
+							  "while [ ! -e gsp_agent_run.pid -o ! -e ogp_agent.pid ];do echo -n .;sleep 1;done\n".
 							  "echo \" [OK]\"\n".
 							  "rm -f tmp_restart.sh\n".
 							  "exit 0\n";

@@ -4,8 +4,8 @@
 /********** CONFIG (panel DB) **********/
 $db = [
   'host' => 'localhost',
-  'user' => 'localuser',
-  'pass' => 'Pkloyn7yvpht!',
+  'user' => 'CHANGE_ME_DB_USER',
+  'pass' => 'CHANGE_ME_DB_PASSWORD',
   'name' => 'panel'
 ];
 $TABLE_PREFIX = 'gsp_';

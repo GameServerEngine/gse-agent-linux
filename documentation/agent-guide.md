@@ -1,95 +1,199 @@
 # Linux Agent Operations Guide
 
-Packaged copy of the instructions we keep in the staff wiki so you can view them offline or import them into any other knowledge base.
+This guide covers installation, configuration, service management, and troubleshooting for the GSP Linux Agent.
 
 ## Purpose
 
-The Linux agent (`ogp_agent.pl`) exposes the RPC endpoint that allows the GameServer Panel to install, start, stop, and monitor game servers on Linux hosts. Every host that runs customer games must run this service.
+The Linux agent exposes the RPC endpoint that allows GameServer Panel to install, start, stop, update, and monitor game servers on Linux hosts.
 
-## Supported platforms
+## Supported Platforms
 
-- Ubuntu 20.04/22.04/24.04 LTS
-- Debian 11/12
-- Rocky/AlmaLinux 8+
-- Any modern distribution with Perl 5.30+, GNU Screen, and rsync
+- Ubuntu 20.04, 22.04, and 24.04 LTS
+- Debian 11 and 12
+- other modern Linux distributions with Perl, GNU Screen, rsync, sudo, and systemd or compatible service management
 
-## Installation (Ubuntu example)
+## Prerequisites
 
-```bash
-sudo apt update
-sudo apt install -y git curl rsync screen perl libxml-parser-perl libpath-class-perl libarchive-zip-perl libhttp-daemon-perl
-sudo git clone https://github.com/GameServerPanel/GSP-Agent-Linux.git /opt/gsp-agent
-cd /opt/gsp-agent
-sudo bash install.sh
-sudo bash agent_conf.sh -s "root-password" -u ogp_agent
-```
-
-`agent_conf.sh` writes `/home/ogp_agent/Cfg/Config.pm`. Set:
-
-| Key | Description |
-| --- | ----------- |
-| `listen_ip` | Interface to bind (use `0.0.0.0` unless you want to restrict access). |
-| `listen_port` | TCP port exposed to the panel. Default is `12679`. |
-| `key` | Shared secret copied from the panel → Administration → Game Servers. |
-| `web_api_url` | HTTPS URL to `ogp_api.php` on the panel. |
-| `agent_event_url` | HTTPS URL to `agent_event_receiver.php` on the panel for lifecycle activity-log events. |
-| `remote_server_id` | Panel remote server ID for this agent. Required for signed lifecycle event delivery. |
-| `stats_db_*` | Optional MySQL credentials for the resource stats cron. |
-
-## Service management
+For Debian and Ubuntu hosts:
 
 ```bash
-sudo cp systemd/ogp_agent.service /etc/systemd/system/
-sudo sed -i "s#{OGP_AGENT_PATH}#/opt/gsp-agent#g" /etc/systemd/system/ogp_agent.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now ogp_agent
+chmod +x install_agent_prereqs.sh
+sudo ./install_agent_prereqs.sh
 ```
 
-Logs live next to the binaries (`/opt/gsp-agent/ogp_agent.log`). Individual game servers stream to their own `console.log` files inside each home folder.
+The prerequisite script installs required Perl modules, `screen`, `rsync`, `sudo`, `unzip`, `git`, `curl`, PureFTPd, and related utilities. It no longer attempts obsolete Ubuntu packages such as `libgcc1:i386`, `lib32gcc1`, `libcrypt-xxtea-perl`, or `libfile-basename-perl`.
 
-## Firewall checklist
+The script may show normal `needrestart` output about services, kernels, or VM guests. That output comes from the OS package manager and does not mean the GSP agent installer failed.
 
-1. Allow inbound TCP on the agent port.
-2. Allow inbound/outbound UDP/TCP for the games you host.
-3. Allow outbound HTTPS to the panel so the agent can talk to `ogp_api.php`.
+## Guided Installation
 
-## Upgrades
+```bash
+chmod +x install.sh agent_conf.sh gsp_agent_run ogp_agent_run
+sudo ./install.sh
+```
 
-1. `cd /opt/gsp-agent && git pull`
-2. Stop the service (`sudo systemctl stop ogp_agent`).
-3. Re-run `bash install.sh` if new files were added.
-4. Start the service (`sudo systemctl start ogp_agent`).
-5. Verify the panel shows the agent as “online”.
+Default choices:
+
+- install directory: `/home/gameserver/GSP`
+- Linux user: `gameserver`
+- service name: `gsp_agent`
+- log file: `/home/gameserver/GSP/gsp_agent.log`
+
+The installer runs as root from the start. If launched without root and `sudo` is available, it re-executes itself through `sudo` before creating users, copying files, or installing systemd units.
+
+## Configuration Prompts
+
+The installer calls `agent_conf.sh --guided`. The guided configuration asks for the agent key/shared secret, listen IP, listen port, Panel API URL, Panel event receiver URL, remote server ID, FTP management setting, FTP method, game-server autorestart setting, and restart-time agent auto-update setting.
+
+The agent key/shared secret must match the remote-server record in the GSP Panel.
+
+## Configuration Files
+
+Runtime config lives in:
+
+- `/home/gameserver/GSP/Cfg/Config.pm`
+- `/home/gameserver/GSP/Cfg/Preferences.pm`
+- `/home/gameserver/GSP/Cfg/bash_prefs.cfg`
+
+Important `Config.pm` keys:
+
+- `logfile`
+- `listen_ip`
+- `listen_port`
+- `key`
+- `web_api_url`
+- `agent_event_url`
+- `remote_server_id`
+
+Important `Preferences.pm` keys:
+
+- `gsp_manages_ftp`
+- `gsp_autorestart_server`
+- `ftp_method`
+- `PortValidationEnabled`
+- `StartupValidationTimeoutSeconds`
+- `PortCheckIntervalSeconds`
+
+Compatibility aliases are still written for older panel/agent paths:
+
+- `ogp_manages_ftp`
+- `ogp_autorestart_server`
+
+## Folder Layout
+
+Default runtime folders:
+
+- `Cfg/`
+- `logs/`
+- `tmp/`
+- `screenlogs/`
+- `runtime_status/`
+- `events/`
+- `_gsp_content/hooks/`
+- `_gsp_content/generated/`
+- `_gsp_content/runtime/`
+
+The `_gsp_content/runtime/server_content.pids` file is reserved for generated server-content hook processes. During stop/restart cleanup, hook watchdog PIDs are stopped before hook application PIDs. The main game server watchdog PID should not be stored in this file.
+
+## systemd Service
+
+New installs use:
+
+- `gsp_agent.service`
+
+Useful commands:
+
+```bash
+sudo systemctl status gsp_agent
+sudo systemctl restart gsp_agent
+sudo systemctl stop gsp_agent
+sudo journalctl -u gsp_agent -f
+```
+
+The generated unit runs as the selected agent user, sets `WorkingDirectory` to the selected install directory, and starts `gsp_agent_run`.
+
+## Logs
+
+- main agent log: `/home/gameserver/GSP/gsp_agent.log`
+- systemd journal: `sudo journalctl -u gsp_agent -f`
+- screen logs: `/home/gameserver/GSP/screenlogs/`
+- activity event offline queue: `/home/gameserver/GSP/events/pending-events.jsonl`
+
+## Manual Reconfiguration
+
+```bash
+cd /home/gameserver/GSP
+./agent_conf.sh --guided --install-dir /home/gameserver/GSP --agent-user gameserver
+sudo systemctl restart gsp_agent
+```
+
+Use noninteractive flags when automating:
+
+```bash
+./agent_conf.sh \
+  --install-dir /home/gameserver/GSP \
+  --agent-user gameserver \
+  --key CHANGE_ME \
+  --listen-ip 0.0.0.0 \
+  --listen-port 12679 \
+  --web-api-url https://panel.example.com/ogp_api.php \
+  --agent-event-url https://panel.example.com/agent_event_receiver.php \
+  --remote-server-id 1
+```
+
+## FTP Configuration
+
+Default FTP mode is PureFTPd-compatible account management:
+
+- `gsp_manages_ftp => '1'`
+- `ftp_method => 'PureFTPd'`
+
+Set `gsp_manages_ftp` to `0` if FTP accounts are managed outside the agent.
 
 ## Troubleshooting
 
-- `tail -f ogp_agent.log` – handshake failures usually mean the encryption key or port mismatches the panel entry.
-- `journalctl -u ogp_agent` – capture Perl stack traces and missing dependency errors.
-- `screen -ls` – confirm customer servers are running in screen sessions.
-- `nc -vz panel.example.com 12679` from the panel host – ensures the agent port is reachable.
+Authentication failed or Panel shows agent offline:
 
-## Server lifecycle tracking
+- confirm `key` in `Cfg/Config.pm` matches the Panel remote-server key
+- confirm `listen_port` is reachable from the Panel host
+- check firewall rules
 
-The Linux agent now keeps per-home PID metadata under:
+Polkit or systemctl authentication failure:
 
-- `runtime_status/pid-<home_id>.kv`
+- run `sudo ./install.sh`
+- do not start with a non-root partial install
+- inspect `sudo journalctl -u gsp_agent -f`
 
-This metadata is used by stop/restart verification in addition to screen and port checks.
+Wrong install path or old `/home/gameserver/OGP` log path:
 
-Stop escalation now verifies all of the following are cleared before success:
+- rerun `./agent_conf.sh --guided --install-dir /home/gameserver/GSP`
+- confirm `Cfg/Config.pm` has `logfile => '/home/gameserver/GSP/gsp_agent.log'`
+- confirm the systemd unit `WorkingDirectory` points to `/home/gameserver/GSP`
 
-1. managed screen session
-2. tracked process PID(s)
-3. listening game port
+Missing packages:
 
-Lifecycle control no longer uses game-home `SERVER_STOPPED` marker files.
+- rerun `sudo ./install_agent_prereqs.sh`
+- confirm `screen`, `rsync`, `perl`, `git`, `curl`, and required Perl modules are installed
 
-See `docs/AGENT_ACTIVITY_EVENTS.md` for Panel activity-log event delivery, offline queue behavior, and troubleshooting.
-Explicit stop intent and autorestart suppression are now controlled through agent-owned runtime status hints (`STOPPING`/`STOPPED`) and verified runtime checks.
+Service failed:
 
-Restart remains stop-first and waits 60 seconds, then re-verifies stop completion before starting again to avoid duplicate instances.
+- run `sudo systemctl status gsp_agent`
+- run `sudo journalctl -u gsp_agent -f`
+- run `perl -c /home/gameserver/GSP/ogp_agent.pl`
 
-## Related docs
+Config missing or invalid:
 
-- [`GSP/documentation/admin-guide.md`](https://github.com/GameServerPanel/GSP/tree/main/documentation) – Panel-side instructions plus XML authoring notes.
-- [`GSP-Agent-Windows/documentation/agent-guide.md`](https://github.com/GameServerPanel/GSP-Agent-Windows/tree/main/documentation/agent-guide.md) – Windows counterpart.
+- run `./agent_conf.sh --guided`
+- replace placeholder `CHANGE_ME_PANEL_AGENT_KEY`
+- verify `Cfg/Config.pm` is readable by the agent user
+
+## Clean Reinstall
+
+```bash
+sudo systemctl stop gsp_agent || true
+sudo systemctl disable gsp_agent || true
+sudo rm -f /etc/systemd/system/gsp_agent.service
+sudo systemctl daemon-reload
+```
+
+Only remove `/home/gameserver/GSP` after confirming it does not contain customer server data, logs, SteamCMD data, or local configuration that must be preserved.

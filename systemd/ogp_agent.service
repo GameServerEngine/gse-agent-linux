@@ -1,16 +1,18 @@
-# ogp_agent systemd Service Script
-
+# Legacy compatibility unit. New installs should use gsp_agent.service.
 
 [Unit]
-Description=GameServer Panel (GSP) Daemon www.worlddomination.dev
-After=network.target
+Description=GameServer Panel Linux Agent legacy service alias
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=oneshot
-ExecStart=/bin/sh -c "{OGP_AGENT_PATH}/ogp_agent_init start"
-ExecStop=/bin/sh -c "{OGP_AGENT_PATH}/ogp_agent_init stop"
-RemainAfterExit=yes
-PIDFile="{OGP_AGENT_PATH}/ogp_agent_run.pid"
+Type=simple
+User={GSP_AGENT_USER}
+Group={GSP_AGENT_USER}
+WorkingDirectory={GSP_AGENT_PATH}
+ExecStart={GSP_AGENT_PATH}/gsp_agent_run -pidfile {GSP_AGENT_PATH}/gsp_agent_run.pid
+Restart=on-failure
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target

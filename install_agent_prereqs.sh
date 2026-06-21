@@ -1,68 +1,90 @@
-#!/bin/bash
-# OGP Agent Prerequisites Installer for Ubuntu 22.04+
-# This script installs all required packages for running OGP Agent
-# Usage: sudo bash install_agent_prereqs.sh
+#!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "This script must be run as root (use sudo)"
-  exit 1
+	echo "This script installs OS packages and must be run as root."
+	echo "Run: sudo ./install_agent_prereqs.sh"
+	exit 1
 fi
 
-# Update package lists
+if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg >/dev/null 2>&1; then
+	echo "This prerequisite installer currently supports apt/dpkg systems only."
+	echo "Install equivalent Perl, screen, rsync, sudo, unzip, git, curl, and FTP packages manually."
+	exit 1
+fi
+
+echo "Installing GSP Linux Agent prerequisites for Debian/Ubuntu."
+echo "Package manager output from needrestart about services, VM guests, or kernel state is normal OS maintenance output."
+
 apt-get update
 
-# Install core required packages from original prerequisites
-apt-get install -y \
-  libxml-parser-perl \
-  libpath-class-perl \
-  perl-modules \
-  screen \
-  rsync \
-  sudo \
-  e2fsprogs \
-  unzip \
-  subversion \
-  libarchive-extract-perl \
-  pure-ftpd \
-  libarchive-zip-perl \
-  libc6 \
-  libgcc1 \
-  git \
-  curl \
-  libhttp-daemon-perl
+required_packages=(
+	perl
+	libxml-parser-perl
+	libpath-class-perl
+	libarchive-extract-perl
+	libarchive-zip-perl
+	libhttp-daemon-perl
+	libfrontier-rpc-perl
+	libfile-copy-recursive-perl
+	libschedule-cron-perl
+	libio-compress-perl
+	libcompress-raw-zlib-perl
+	libfile-find-rule-perl
+	libwww-perl
+	screen
+	rsync
+	sudo
+	e2fsprogs
+	unzip
+	subversion
+	git
+	curl
+	ca-certificates
+	pure-ftpd
+	libc6
+)
 
-# Install 32-bit compatibility libraries (may fail on some systems, continue anyway)
-apt-get install -y libc6-i386 || echo "Warning: Could not install libc6-i386"
-apt-get install -y libgcc1:i386 || echo "Warning: Could not install libgcc1:i386" 
-apt-get install -y lib32gcc1 || echo "Warning: Could not install lib32gcc1"
+optional_packages=(
+	libdbi-perl
+	libdbd-mysql-perl
+	libfcgi-perl
+	apache2
+	php
+	php-mysql
+)
 
-# Install additional modern packages for current OGP agent
-apt-get install -y \
-  libdbi-perl \
-  libdbd-mysql-perl \
-  libfrontier-rpc-perl \
-  libfile-copy-recursive-perl \
-  libcrypt-xxtea-perl \
-  libschedule-cron-perl \
-  libmime-base64-perl \
-  libgetopt-long-descriptive-perl \
-  libio-compress-perl \
-  libcompress-raw-zlib-perl \
-  libfile-find-rule-perl \
-  libfile-basename-perl \
-  libfcgi-perl \
-  libwww-perl
+apt-get install -y "${required_packages[@]}"
 
-# Optional: For FTP management (pure-ftpd already installed above)
-# apt-get install -y proftpd-basic
+for pkg in "${optional_packages[@]}"; do
+	if ! apt-get install -y "$pkg"; then
+		echo "Warning: optional package ${pkg} could not be installed."
+	fi
+done
 
-# Optional: For web panel integration
-apt-get install -y apache2 php php-mysql || echo "Warning: Optional web packages could not be installed"
+echo
+echo "32-bit compatibility packages are useful for some legacy SteamCMD/game-server binaries."
+read -r -p "Enable i386 architecture and install 32-bit compatibility packages? [yes]: " install_i386
+install_i386="${install_i386:-yes}"
+if [[ "$install_i386" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+	if ! dpkg --print-foreign-architectures | grep -qx i386; then
+		dpkg --add-architecture i386
+		apt-get update
+	fi
+	for pkg in libc6-i386 lib32gcc-s1 libgcc-s1:i386; do
+		if ! apt-get install -y "$pkg"; then
+			echo "Warning: optional 32-bit package ${pkg} could not be installed."
+		fi
+	done
+fi
 
-# Done
+cat <<'EOF'
 
-echo "All required packages for OGP Agent have been installed."
-echo "Note: Some 32-bit compatibility libraries may not be available on all systems."
-echo "This is normal for modern 64-bit only distributions."
+Prerequisite installation finished.
+
+Notes:
+- MIME::Base64, File::Basename, and Getopt::Long are Perl core modules and are not installed as separate apt packages.
+- Crypt::XXTEA is bundled in this repository under Crypt/XXTEA.pm, so libcrypt-xxtea-perl is not required from apt.
+- needrestart messages about services or VM guests are normal package-manager output after dependency installation.
+EOF

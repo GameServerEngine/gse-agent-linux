@@ -27,7 +27,7 @@ if (file_exists("config.php")) {
 
 include_once 'db_functions.php';
 
-// Did we properly receive the variables from the OGP agent?
+// Did we properly receive the variables from the GSP agent?
 
 if (isset($ftp_username) && isset($ftp_pass) && isset($rDir)) {
 
@@ -35,7 +35,7 @@ if (isset($ftp_username) && isset($ftp_pass) && isset($rDir)) {
     $errorCount = 0;
     $errorInstallInt = 0;
 
-    // OGP should be doing this validation... but it's not
+    // GSP should be doing this validation before calling this helper.
     
     // Custom directory validation
 

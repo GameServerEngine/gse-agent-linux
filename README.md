@@ -1,37 +1,60 @@
 # GSP Linux Agent
 
-Perl-based agent that receives signed RPC calls from the GameServer Panel (GSP) and launches customer servers on Linux hosts. It replaces the upstream OGP agent with our service wrappers, stats hooks, and documentation.
+Perl-based Linux execution agent for GameServer Panel. The agent receives signed RPC calls from the GSP Panel and launches customer game servers on Linux hosts.
 
-## Features
+## Default Layout
 
-- TLS-ready RPC listener (default port 12679/TCP)
-- GNU Screen process management + PID tracking
-- SteamCMD helpers for installing/updating games
-- Optional resource stats reporting to MySQL
-- Systemd service definitions and bootstrap scripts
+- install directory: `/home/gameserver/GSP`
+- run script: `gsp_agent_run`
+- legacy run wrapper: `ogp_agent_run`
+- systemd service: `gsp_agent.service`
+- config directory: `/home/gameserver/GSP/Cfg/`
+- main log: `/home/gameserver/GSP/gsp_agent.log`
+- screen logs: `/home/gameserver/GSP/screenlogs/`
+- server-content runtime: `/home/gameserver/GSP/_gsp_content/`
 
-## Install (Ubuntu example)
+Legacy OGP script names are retained only where the Panel or older installs may still expect them.
+
+## Guided Install
 
 ```bash
-sudo apt update
-sudo apt install -y git curl rsync screen perl libxml-parser-perl libpath-class-perl
-sudo git clone https://github.com/GameServerPanel/GSP-Agent-Linux.git /opt/gsp-agent
-cd /opt/gsp-agent
-sudo bash install.sh
-sudo bash agent_conf.sh -s "root-password" -u ogp_agent
+chmod +x install_agent_prereqs.sh install.sh agent_conf.sh gsp_agent_run ogp_agent_run
+sudo ./install_agent_prereqs.sh
+sudo ./install.sh
 ```
 
-After running `agent_conf.sh`, edit `/home/ogp_agent/Cfg/Config.pm` so `listen_ip`, `listen_port`, `key`, and `web_api_url` match the server entry you created inside the GSP web panel.
+The installer prompts for the install directory, Linux agent user, service name, agent key/shared secret, listen address, Panel URLs, remote server ID, FTP mode, and whether to install/start the systemd service.
+
+Use the same agent key/shared secret configured in the GSP Panel remote-server record.
+
+## Service Commands
+
+```bash
+sudo systemctl status gsp_agent
+sudo journalctl -u gsp_agent -f
+sudo systemctl restart gsp_agent
+tail -f /home/gameserver/GSP/gsp_agent.log
+```
+
+## Manual Configuration
+
+```bash
+./agent_conf.sh --guided --install-dir /home/gameserver/GSP --agent-user gameserver
+```
+
+Generated files:
+
+- `Cfg/Config.pm`
+- `Cfg/Preferences.pm`
+- `Cfg/bash_prefs.cfg`
 
 ## Documentation
 
-Offline instructions, upgrade notes, and troubleshooting tips live under [`documentation/agent-guide.md`](documentation/agent-guide.md). Import that file into your wiki if you need a browsable version.
+- [Linux Agent Operations Guide](documentation/agent-guide.md)
+- [Panel Integration](docs/PANEL_INTEGRATION.md)
+- [Agent Activity Events](docs/AGENT_ACTIVITY_EVENTS.md)
 
-## Related projects
+## Related Projects
 
-- [GSP](https://github.com/GameServerPanel/GSP) – The web panel that issues commands to this agent.
-- [GSP-Agent-Windows](https://github.com/GameServerPanel/GSP-Agent-Windows) – Windows counterpart with Task Scheduler wrappers.
-
-## Contributing
-
-Pull requests are welcome. Please keep Perl code formatted with `perltidy`, validate new service files on a staging host, and document behavior changes in `documentation/agent-guide.md`.
+- GSP Panel: control plane that sends agent commands
+- GSP-Agent-Windows: Windows/Cygwin execution engine
