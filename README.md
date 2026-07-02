@@ -6,19 +6,19 @@ Perl-based Linux execution agent for GameServer Panel. The agent receives signed
 
 - install directory: `/home/gameserver/GSP`
 - run script: `gsp_agent_run`
-- legacy run wrapper: `ogp_agent_run`
+- legacy run wrapper: `gsp_agent_run`
 - systemd service: `gsp_agent.service`
 - config directory: `/home/gameserver/GSP/Cfg/`
 - main log: `/home/gameserver/GSP/gsp_agent.log`
 - screen logs: `/home/gameserver/GSP/screenlogs/`
 - server-content runtime: `/home/gameserver/GSP/_gsp_content/`
 
-Legacy OGP script names are retained only where the Panel or older installs may still expect them.
+Legacy GSP script names are retained only where the Panel or older installs may still expect them.
 
 ## Guided Install
 
 ```bash
-chmod +x install_agent_prereqs.sh install.sh agent_conf.sh gsp_agent_run ogp_agent_run
+chmod +x install_agent_prereqs.sh install.sh agent_conf.sh gsp_agent_run gsp_agent_run
 sudo ./install_agent_prereqs.sh
 sudo ./install.sh
 ```

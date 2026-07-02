@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 ### BEGIN INIT INFO
-# Provides:          ogp_agent
+# Provides:          gsp_agent
 # Required-Start:    $all
 # Required-Stop:     $all
 # Should-Start:      $all
@@ -13,8 +13,8 @@
 ### END INIT INFO
 #
 
-agent_dir=OGP_AGENT_DIR
-agent_user=OGP_USER
+agent_dir=GSP_AGENT_DIR
+agent_user=GSP_USER
 
 #
 # main()
@@ -90,7 +90,7 @@ start() {
 	fi
 
 	cd $agent_dir
-	out=$(su -c "screen -d -m -t gsp_agent -c ogp_screenrc -S gsp_agent ./gsp_agent_run -pidfile gsp_agent_run.pid" $agent_user >/dev/null 2>&1)
+	out=$(su -c "screen -d -m -t gsp_agent -c gsp_screenrc -S gsp_agent ./gsp_agent_run -pidfile gsp_agent_run.pid" $agent_user >/dev/null 2>&1)
 	return 0
 }
 

@@ -13,7 +13,7 @@ New Linux installs default to:
 - service: `gsp_agent.service`
 - log file: `/home/gameserver/GSP/gsp_agent.log`
 
-Legacy names such as `ogp_agent_run` remain wrappers or protocol compatibility details only.
+Legacy names such as `gsp_agent_run` remain wrappers or protocol compatibility details only.
 
 ## Legacy Workshop RPC
 

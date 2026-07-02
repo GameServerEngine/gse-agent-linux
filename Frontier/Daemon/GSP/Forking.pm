@@ -1,4 +1,4 @@
-package Frontier::Daemon::OGP::Forking;
+package Frontier::Daemon::GSP::Forking;
 # $Id: Forking.pm,v 1.6 2004/01/23 19:48:33 tcaine Exp $
 
 use strict;
@@ -14,7 +14,7 @@ use HTTP::Status;
 
 #  most of this routine comes directly from Frontier::Daemon
 sub new {
-    my $class    = shift; 
+    my $class    = shift;
     my %args     = @_;
     my $encoding = delete $args{encoding};
     my $self     = $class->SUPER::new( %args );
@@ -39,14 +39,14 @@ ACCEPT:
         if ( not defined $pid ) {
             warn "fork() failed: $!";
             $conn = undef;
-        } 
+        }
         else {
             my $request = $conn->get_request;
             if ($request) {
                 if ($request->method eq 'POST' && $request->url->path eq '/RPC2') {
                     ${*$self}{'response'}->content(
                         ${*$self}{'decode'}->serve(
-                            $request->content, 
+                            $request->content,
                             ${*$self}{'methods'},
                         )
                     );

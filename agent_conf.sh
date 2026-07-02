@@ -24,7 +24,7 @@ Options:
   --listen-ip IP              Agent bind IP. Default: ${DEFAULT_IP}
   --listen-port PORT          Agent bind port. Default: ${DEFAULT_PORT}
   --sudo-password VALUE       Optional sudo password for legacy sudo_exec flows.
-  --web-api-url URL           Panel ogp_api.php URL.
+  --web-api-url URL           Panel gsp_api.php URL.
   --agent-event-url URL       Panel agent_event_receiver.php URL.
   --remote-server-id ID       Panel remote server ID.
   --ftp-managed 0|1           Whether GSP should manage FTP accounts. Default: 1
@@ -130,7 +130,7 @@ if [ "$guided" -eq 1 ]; then
 	key="${key:-$(ask_secret "Agent key/shared secret")}"
 	listen_ip="$(ask "Listen IP" "$listen_ip")"
 	listen_port="$(ask "Listen port" "$listen_port")"
-	web_api_url="$(ask "Panel API URL, usually https://panel.example.com/ogp_api.php" "$web_api_url")"
+	web_api_url="$(ask "Panel API URL, usually https://panel.example.com/gsp_api.php" "$web_api_url")"
 	agent_event_url="$(ask "Panel event receiver URL, usually https://panel.example.com/agent_event_receiver.php" "$agent_event_url")"
 	remote_server_id="$(ask "Panel remote server ID" "$remote_server_id")"
 	ftp_managed="$(ask "Manage FTP accounts? 1=yes, 0=no" "$ftp_managed")"
@@ -181,10 +181,8 @@ cat > "$prefsfile" <<EOF
 	screen_log_local => '${screen_log_local}',
 	delete_logs_after => '${delete_logs_after}',
 	gsp_manages_ftp => '${ftp_managed}',
-	ogp_manages_ftp => '${ftp_managed}',
 	ftp_method => '${ftp_method}',
 	gsp_autorestart_server => '${auto_restart}',
-	ogp_autorestart_server => '${auto_restart}',
 	protocol_shutdown_waittime => '${protocol_shutdown_waittime}',
 	linux_user_per_game_server => '${linux_user_per_game_server}',
 	PortValidationEnabled => '1',
@@ -197,7 +195,7 @@ cat > "$bashprefsfile" <<EOF
 agent_auto_update=${auto_update}
 agent_update_repo_url=http://forge.runlevelsystems.com/dev/GSP.git
 agent_update_branch=Panel-unstable
-agent_update_raw_url=http://forge.runlevelsystems.com/dev/GSP/raw/branch/Panel-unstable/Agent-Linux/ogp_agent.pl
+agent_update_raw_url=http://forge.runlevelsystems.com/dev/GSP/raw/branch/Panel-unstable/Agent-Linux/gsp_agent.pl
 run_pureftpd=${ftp_managed}
 ftp_port=${ftp_port}
 ftp_ip=${ftp_ip}

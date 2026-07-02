@@ -1,8 +1,7 @@
 #!/usr/bin/perl
 #
 # GameServer Panel Linux Agent
-# Forked from the Open Game Panel agent.
-# Copyright (C) 2008 - 2018 The OGP Development Team
+# Copyright (C) 2008 - 2018 The GSP Development Team
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -24,7 +23,7 @@ use strict;
 
 use Cwd;			 # Fast way to get the current directory
 use lib getcwd();
-use Frontier::Daemon::OGP::Forking;	# Forking XML-RPC server
+use Frontier::Daemon::GSP::Forking;	# Forking XML-RPC server
 use File::Copy;				   # Simple file copy functions
 use File::Copy::Recursive
   qw(fcopy rcopy dircopy fmove rmove dirmove pathempty pathrmdir)
@@ -76,7 +75,7 @@ use constant SCREEN_LOG_LOCAL  => $Cfg::Preferences{screen_log_local};
 use constant DELETE_LOGS_AFTER  => $Cfg::Preferences{delete_logs_after};
 use constant LINUX_USER_PER_GAME_SERVER  => $Cfg::Preferences{linux_user_per_game_server};
 use constant AGENT_PID_FILE =>
-  Path::Class::File->new(AGENT_RUN_DIR, 'ogp_agent.pid');
+  Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent.pid');
 use constant AGENT_RSYNC_GENERIC_LOG =>
   Path::Class::File->new(AGENT_RUN_DIR, 'rsync_update_generic.log');
 use constant STEAM_LICENSE_OK => "Accept";
@@ -97,14 +96,14 @@ use constant AGENT_EVENTS_DIR =>
 use constant AGENT_EVENT_QUEUE_FILE =>
 	Path::Class::File->new(AGENT_EVENTS_DIR, 'pending-events.jsonl');
 use constant SCREENRC_FILE =>
-  Path::Class::File->new(AGENT_RUN_DIR, 'ogp_screenrc');
+  Path::Class::File->new(AGENT_RUN_DIR, 'gsp_screenrc');
 use constant SCREENRC_FILE_BK =>
-  Path::Class::File->new(AGENT_RUN_DIR, 'ogp_screenrc_bk');
+  Path::Class::File->new(AGENT_RUN_DIR, 'gsp_screenrc_bk');
 use constant SCREENRC_TMP_FILE =>
-  Path::Class::File->new(AGENT_RUN_DIR, 'ogp_screenrc.tmp');
+  Path::Class::File->new(AGENT_RUN_DIR, 'gsp_screenrc.tmp');
 use constant SCREEN_TYPE_HOME   => "HOME";
 use constant SCREEN_TYPE_UPDATE => "UPDATE";
-use constant SERVER_RUNNER_USER => "ogp_server_runner";
+use constant SERVER_RUNNER_USER => "gsp_server_runner";
 use constant FD_DIR => Path::Class::Dir->new(AGENT_RUN_DIR, 'FastDownload');
 use constant FD_ALIASES_DIR => Path::Class::Dir->new(FD_DIR, 'aliases');
 use constant FD_PID_FILE => Path::Class::File->new(FD_DIR, 'fd.pid');
@@ -187,7 +186,7 @@ sub agent_event_panel_url
 	if(defined($Cfg::Config{web_api_url}) && $Cfg::Config{web_api_url} ne "")
 	{
 		my $url = $Cfg::Config{web_api_url};
-		$url =~ s/ogp_api\.php(?:\?.*)?$/agent_event_receiver.php/;
+		$url =~ s/gsp_api\.php(?:\?.*)?$/agent_event_receiver.php/;
 		return $url if($url =~ /agent_event_receiver\.php$/);
 		$url =~ s/\/+$//;
 		return "$url/agent_event_receiver.php";
@@ -227,7 +226,8 @@ sub cleanup_server_content_pid_group_without_decrypt
 	my ($pid_file, $wanted_role, $as_user) = @_;
 	return if(!-f $pid_file);
 	my @remaining;
-	if(!open(my $in, '<', $pid_file))
+	my $in;
+	if(!open($in, '<', $pid_file))
 	{
 		logger "Could not read server content PID file $pid_file: $!";
 		return;
@@ -249,7 +249,7 @@ sub cleanup_server_content_pid_group_without_decrypt
 			sudo_exec_without_decrypt("kill -KILL $pid >/dev/null 2>&1 || true", $as_user);
 			next;
 		}
-		push(@remaining, $original) if($role ne "watchdog" && $role ne "app");
+		push(@remaining, $original);
 	}
 	close($in);
 	if(open(my $out, '>', $pid_file))
@@ -706,7 +706,7 @@ if(-e Path::Class::File->new(FD_DIR, 'Settings.pm'))
 	}
 }
 
-my $d = Frontier::Daemon::OGP::Forking->new(
+my $d = Frontier::Daemon::GSP::Forking->new(
 			 methods => {
 					 is_screen_running				=> \&is_screen_running,
 					 server_status					=> \&server_status,
@@ -919,13 +919,13 @@ sub get_home_pids
 sub create_screen_id
 {
 	my ($screen_type, $home_id) = @_;
-	return sprintf("OGP_%s_%09d", $screen_type, $home_id);
+	return sprintf("GSP_%s_%09d", $screen_type, $home_id);
 }
 
 sub create_screen_cmd
 {
 	my ($screen_id, $exec_cmd) = @_;
-	$exec_cmd = replace_OGP_Env_Vars($screen_id, "", "", $exec_cmd);
+	$exec_cmd = replace_GSP_Env_Vars($screen_id, "", "", $exec_cmd);
 	return
 	  sprintf('export WINEDEBUG="fixme-all" && export DISPLAY=:1 && screen -d -m -t "%1$s" -c ' . SCREENRC_FILE . ' -S %1$s %2$s',
 			  $screen_id, $exec_cmd);
@@ -937,7 +937,7 @@ sub create_screen_cmd_loop
 	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file) = @_;
 	my $server_start_bashfile = $screen_id . "_startup_scr.sh";
 
-	$exec_cmd = replace_OGP_Env_Vars($screen_id, "", "", $exec_cmd);
+	$exec_cmd = replace_GSP_Env_Vars($screen_id, "", "", $exec_cmd);
 
 	# Allow file to be overwritten
 	if(-e $server_start_bashfile){
@@ -1004,8 +1004,8 @@ sub create_screen_cmd_loop
 sub handle_lock_command_line{
 	my ($command) = @_;
 	if(defined $command && $command ne ""){
-		if ($command =~ m/{OGP_LOCK_FILE}/) {
-			$command =~ s/{OGP_LOCK_FILE}\s*//g;
+		if ($command =~ m/{GSP_LOCK_FILE}/) {
+			$command =~ s/{GSP_LOCK_FILE}\s*//g;
 			return secure_path_without_decrypt("chattr+i", $command);
 		}
 	}
@@ -1013,7 +1013,7 @@ sub handle_lock_command_line{
 	return 0;
 }
 
-sub replace_OGP_Env_Vars{
+sub replace_GSP_Env_Vars{
 	# This function replaces constants from environment variables set in the XML
 	my ($screen_id, $homeid, $homepath, $exec_cmd, $game_key) = @_;
 
@@ -1027,7 +1027,7 @@ sub replace_OGP_Env_Vars{
 		# If the install file exists, the game can be auto updated, else it will be ignored by the game for improper syntax
 		# To generate the install file, the "Install/Update via Steam" button must be clicked on at least once!
 		if(-e $fullPath){
-			$exec_cmd =~ s/{OGP_STEAM_CMD_DIR}/$steamCMDPath/g;
+			$exec_cmd =~ s/{GSP_STEAM_CMD_DIR}/$steamCMDPath/g;
 			$exec_cmd =~ s/{STEAMCMD_INSTALL_FILE}/$steamInsFile/g;
 		}
 	}
@@ -1035,7 +1035,7 @@ sub replace_OGP_Env_Vars{
 
 	# Handle home directory replacement
 	if(defined $homepath && $homepath ne ""){
-		$exec_cmd =~ s/{OGP_HOME_DIR}/$homepath/g;
+		$exec_cmd =~ s/{GSP_HOME_DIR}/$homepath/g;
 	}
 
 	# Handle global game shared directory replacement
@@ -1047,7 +1047,7 @@ sub replace_OGP_Env_Vars{
 		{
 			logger "Could not create " . $shared_path . " directory $!.", 1;
 		}
-		$exec_cmd =~ s/{OGP_GAME_SHARED_DIR}/$shared_path/g;
+		$exec_cmd =~ s/{GSP_GAME_SHARED_DIR}/$shared_path/g;
 	}
 
 	return $exec_cmd;
@@ -1573,12 +1573,12 @@ sub universal_start_without_decrypt
 
 	my $owner = SERVER_RUNNER_USER;
 	my $group = SERVER_RUNNER_USER;
-	my $ogpAgentGroup = `whoami`;
+	my $gspAgentGroup = `whoami`;
 
 	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
 	my $status_hint_file = get_status_hint_path($home_id);
 
-	chomp $ogpAgentGroup;
+	chomp $gspAgentGroup;
 
 	if(defined LINUX_USER_PER_GAME_SERVER && LINUX_USER_PER_GAME_SERVER eq "1"){
 		$owner = "gamehome" . $home_id;
@@ -1596,12 +1596,12 @@ sub universal_start_without_decrypt
 		}
 	}
 
-	# Fix perms on ogp_agent user's homedir so that other users can access their owned files within this dir
-	my $fixOGPHomeDirCommand = 'chmod -R ug+rwx $( getent passwd "' . $ogpAgentGroup . '" | cut -d: -f6 )';
-	sudo_exec_without_decrypt($fixOGPHomeDirCommand);
+	# Fix perms on the GSP agent user's homedir so other users can access owned files within this dir.
+	my $fixGSPHomeDirCommand = 'chmod -R ug+rwx $( getent passwd "' . $gspAgentGroup . '" | cut -d: -f6 )';
+	sudo_exec_without_decrypt($fixGSPHomeDirCommand);
 
-	$fixOGPHomeDirCommand = 'find "$( getent passwd "' . $ogpAgentGroup . '" | cut -d: -f6 )" -type d -print0 | xargs -0 chmod o+x';
-	sudo_exec_without_decrypt($fixOGPHomeDirCommand);
+	$fixGSPHomeDirCommand = 'find "$( getent passwd "' . $gspAgentGroup . '" | cut -d: -f6 )" -type d -print0 | xargs -0 chmod o+x';
+	sudo_exec_without_decrypt($fixGSPHomeDirCommand);
 
 	# Some game require that we are in the directory where the binary is.
 	my $game_binary_dir = Path::Class::Dir->new($home_path, $run_dir);
@@ -1638,7 +1638,7 @@ sub universal_start_without_decrypt
 		my @prestartenvvars = split /[\r\n]+/, $envVars;
 		my $envVarStr = "";
 		foreach my $line (@prestartenvvars) {
-			$line = replace_OGP_Env_Vars("", $home_id, $home_path, $line, $game_key);
+			$line = replace_GSP_Env_Vars("", $home_id, $home_path, $line, $game_key);
 			if($line ne ""){
 				logger "Configuring environment variable: $line";
 				$envVarStr .= "$line\n";
@@ -1694,8 +1694,8 @@ sub universal_start_without_decrypt
 	my $run_before_start;
 	prepare_server_content_runtime_without_decrypt($home_path);
 
-	# Replace any OGP variables found in the command line
-	$startup_cmd = replace_OGP_Env_Vars($screen_id, $home_id, $home_path, $startup_cmd, $game_key);
+	# Replace any GSP variables found in the command line
+	$startup_cmd = replace_GSP_Env_Vars($screen_id, $home_id, $home_path, $startup_cmd, $game_key);
 
 	if($file_extension eq ".exe" or $file_extension eq ".bat")
 	{
@@ -1706,7 +1706,7 @@ sub universal_start_without_decrypt
 			$command = "taskset -c $cpu wine $server_exe $startup_cmd";
 		}
 
-		if(preference_enabled('gsp_autorestart_server', 'ogp_autorestart_server', '1')){
+		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
@@ -1721,7 +1721,7 @@ sub universal_start_without_decrypt
 			$command = "taskset -c $cpu $startup_cmd";
 		}
 
-		if(preference_enabled('gsp_autorestart_server', 'ogp_autorestart_server', '1')){
+		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
@@ -1736,7 +1736,7 @@ sub universal_start_without_decrypt
 			$command = "taskset -c $cpu ./$server_exe $startup_cmd";
 		}
 
-		if(preference_enabled('gsp_autorestart_server', 'ogp_autorestart_server', '1')){
+		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
@@ -2929,7 +2929,7 @@ sub lock_additional_files_logic{
 
 	my $commandStr = "";
 	$filesToLock = startup_comma_format_to_multiline($filesToLock);
-	$filesToLock = replace_OGP_Env_Vars("", "", $homedir, $filesToLock);
+	$filesToLock = replace_GSP_Env_Vars("", "", $homedir, $filesToLock);
 	my @filesToProcess = split /[\r\n]+/, $filesToLock;
 	foreach my $line (@filesToProcess) {
 		my $fullPath = $homedir . "/" . $line;
@@ -2993,7 +2993,7 @@ sub multiline_to_startup_comma_format{
 	my ($multiLineVar) = @_;
 	$multiLineVar =~ s/,//g; # commas are invalid anyways in bash
 	$multiLineVar =~ s/[\r]+//g;
-	$multiLineVar =~ s/[\n]+/{OGPNEWLINE}/g;
+	$multiLineVar =~ s/[\n]+/{GSPNEWLINE}/g;
 	return $multiLineVar;
 }
 
@@ -3005,7 +3005,7 @@ sub multiline_to_bash_commands{
 
 sub startup_comma_format_to_multiline{
 	my ($multiLineVar) = @_;
-	$multiLineVar =~ s/{OGPNEWLINE}/\n/g;
+	$multiLineVar =~ s/{GSPNEWLINE}/\n/g;
 	return $multiLineVar;
 }
 
@@ -4236,19 +4236,19 @@ sub collect_and_insert_process_samples
 		chomp($session);
 		next unless $session;
 
-		# Extract server name from screen session name (format: OGP_HOME_000001518 or similar)
+		# Extract server name from screen session name (format: GSP_HOME_000001518 or similar)
 		my $server_name = $session;
 		my $server_path = '/';
 
-		# Try to extract home_id from OGP screen session and map to server_id
-		if ($session =~ /OGP_HOME_0*(\d+)/) {
+		# Try to extract home_id from GSP screen session and map to server_id
+		if ($session =~ /GSP_HOME_0*(\d+)/) {
 			my $home_id = $1;
 			if (exists $home_id_to_server_id{$home_id}) {
 				$server_name = $home_id_to_server_id{$home_id};  # Use actual server ID
 			} else {
 				$server_name = "GameServer_Home_$home_id";  # Fallback to home_id
 			}
-		} elsif ($session =~ /OGP_\w+_(.+)/) {
+		} elsif ($session =~ /GSP_\w+_(.+)/) {
 			$server_name = $1;
 		} elsif ($session =~ /(\d+)\.(.+)/) {
 			$server_name = $2;
@@ -4316,7 +4316,7 @@ sub collect_and_insert_process_samples
 			# Avoid duplicates by checking if we already processed this PID
 			next if grep { $_->{pid} == $pid } @processes;
 
-			# Only process if this executable has a startup file (is managed by OGP)
+			# Only process if this executable has a startup file (is managed by GSP)
 			if (exists $startup_executables{$exe_name}) {
 				my $startup_info = $startup_executables{$exe_name};
 				# Use the actual server ID from the startup file
@@ -4326,7 +4326,7 @@ sub collect_and_insert_process_samples
 				my $proc_info = get_process_info($pid, $server_name, $server_path);
 				push @processes, $proc_info if $proc_info;
 			}
-			# If no startup file exists for this executable, we skip it (not managed by OGP)
+			# If no startup file exists for this executable, we skip it (not managed by GSP)
 		}
 	}
 
@@ -4873,7 +4873,7 @@ sub ftp_mgr
 	$password =~ s/('+)/'\"$1\"'/g;
 	$home_path =~ s/('+)/'\"$1\"'/g;
 
-	if(preference_enabled('gsp_manages_ftp', 'ogp_manages_ftp', '1')){
+	if(preference_enabled('gsp_manages_ftp', 'gsp_manages_ftp', '1')){
 		if( defined($Cfg::Preferences{ftp_method}) && $Cfg::Preferences{ftp_method} eq "IspConfig")
 		{
 			use constant ISPCONFIG_DIR => Path::Class::Dir->new(AGENT_RUN_DIR, 'IspConfig');
@@ -4935,7 +4935,7 @@ sub ftp_mgr
 
 			chmod 0777, 'ehcp_ftp_log.txt';
 
-			# In order to access the FTP files, the vsftpd user needs to be added to the ogp group
+			# In order to access the FTP files, the vsftpd user needs to be added to the GSP group
 			sudo_exec_without_decrypt("usermod -a -G '$gid' ftp");
 			sudo_exec_without_decrypt("usermod -a -G '$gid' vsftpd");
 			sudo_exec_without_decrypt("usermod -a -G '$gidTwo' ftp");
@@ -5565,8 +5565,8 @@ if command -v rsync >/dev/null 2>&1; then
 else
   (cd "\$SRC" && tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./*.pid' -cf - .) | (cd "\$DEST" && tar -xf -) >> "\$LOG" 2>&1 || fail "tar copy failed"
 fi
-if [ -f "\$DEST/ogp_agent.pl" ]; then
-  perl -c "\$DEST/ogp_agent.pl" >> "\$LOG" 2>&1 || fail "Updated ogp_agent.pl failed syntax validation"
+if [ -f "\$DEST/gsp_agent.pl" ]; then
+  perl -c "\$DEST/gsp_agent.pl" >> "\$LOG" 2>&1 || fail "Updated gsp_agent.pl failed syntax validation"
 fi
 if [ -n "\$POST_UPDATE" ]; then
   (cd "\$DEST" && bash -lc "\$POST_UPDATE") >> "\$LOG" 2>&1 || fail "post-update command failed"
@@ -5576,20 +5576,14 @@ sleep 2
 if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^gsp_agent\\.service'; then
   systemctl restart gsp_agent.service >> "\$LOG" 2>&1 && exit 0
 fi
-if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^ogp_agent\\.service'; then
-  systemctl restart ogp_agent.service >> "\$LOG" 2>&1 && exit 0
-fi
 cd "\$DEST" || exit 0
 if [ -f gsp_agent_run.pid ]; then kill "\$(cat gsp_agent_run.pid)" >/dev/null 2>&1 || true; fi
-if [ -f ogp_agent_run.pid ]; then kill "\$(cat ogp_agent_run.pid)" >/dev/null 2>&1 || true; fi
-if [ -f ogp_agent.pid ]; then kill "\$(cat ogp_agent.pid)" >/dev/null 2>&1 || true; fi
+if [ -f gsp_agent.pid ]; then kill "\$(cat gsp_agent.pid)" >/dev/null 2>&1 || true; fi
 sleep 2
 if [ -f gsp_agent_run ]; then
   screen -d -m -t "gsp_agent" -c $screenrc_q -S gsp_agent bash gsp_agent_run -pidfile gsp_agent_run.pid >> "\$LOG" 2>&1 || true
-elif [ -f ogp_agent_run ]; then
-  screen -d -m -t "gsp_agent" -c $screenrc_q -S gsp_agent bash ogp_agent_run -pidfile gsp_agent_run.pid >> "\$LOG" 2>&1 || true
 else
-  screen -d -m -t "gsp_agent" -c $screenrc_q -S gsp_agent perl ogp_agent.pl >> "\$LOG" 2>&1 || true
+  screen -d -m -t "gsp_agent" -c $screenrc_q -S gsp_agent perl gsp_agent.pl >> "\$LOG" 2>&1 || true
 fi
 log "restart attempted"
 rm -rf "\$TMP"
@@ -5620,9 +5614,9 @@ sub agent_restart
 	if ($dec_check eq 'restart')
 	{
 		chdir AGENT_RUN_DIR;
-		if(-e "gsp_agent_run.pid" || -e "ogp_agent_run.pid")
-		{
-			my $run_pid_file = -e "gsp_agent_run.pid" ? "gsp_agent_run.pid" : "ogp_agent_run.pid";
+			if(-e "gsp_agent_run.pid")
+			{
+				my $run_pid_file = "gsp_agent_run.pid";
 			my $init_pid	= `cat $run_pid_file`;
 			chomp($init_pid);
 
@@ -5630,10 +5624,10 @@ sub agent_restart
 			{
 				my $or_exist	= "";
 				my $rm_pid_file	= "";
-				if(-e "ogp_agent.pid")
+				if(-e "gsp_agent.pid")
 				{
-					$rm_pid_file	= " ogp_agent.pid";
-					my $agent_pid	= `cat ogp_agent.pid`;
+					$rm_pid_file	= " gsp_agent.pid";
+					my $agent_pid	= `cat gsp_agent.pid`;
 					chomp($agent_pid);
 					if( kill 0, $agent_pid )
 					{
@@ -5645,10 +5639,10 @@ sub agent_restart
 				my $restart = "echo -n \"Stopping GSP Agent...\"\n".
 							  "kill $init_pid\n".
 							  "while [ -e /proc/$init_pid $or_exist ];do echo -n .;sleep 1;done\n".
-							  "rm -f gsp_agent_run.pid ogp_agent_run.pid $rm_pid_file\necho \" [OK]\"\n".
+								  "rm -f gsp_agent_run.pid $rm_pid_file\necho \" [OK]\"\n".
 							  "echo -n \"Starting GSP Agent...\"\n".
 							  "screen -d -m -t \"gsp_agent\" -c \"" . SCREENRC_FILE . "\" -S gsp_agent bash gsp_agent_run -pidfile gsp_agent_run.pid\n".
-							  "while [ ! -e gsp_agent_run.pid -o ! -e ogp_agent.pid ];do echo -n .;sleep 1;done\n".
+							  "while [ ! -e gsp_agent_run.pid -o ! -e gsp_agent.pid ];do echo -n .;sleep 1;done\n".
 							  "echo \" [OK]\"\n".
 							  "rm -f tmp_restart.sh\n".
 							  "exit 0\n";
@@ -6650,8 +6644,8 @@ sub	generate_post_install_scripts
 							 '	if [ -z "$installed_path" ] && [ -e "$mods_full_path/$mod_id" ];then installed_path="$mods_full_path/$mod_id";fi'."\n".
 							 '	installed_folder="$(basename "$installed_path")"'."\n".
 							 "	install_time=\"\$(date '+%Y-%m-%d %H:%M:%S')\"\n".
-							 '	printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "${mod_string[$i]}" "$mod_id" "${mod_name[$i]}" "$installed_folder" "$installed_path" "$workshop_id" "installed" "$install_time" "$install_time" > "${mods_info_home_path}${mod_id}.ogpmod"'."\n".
-							 '	printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "${mod_string[$i]}" "$mod_id" "${mod_name[$i]}" "$installed_folder" "$installed_path" "$workshop_id" "installed" "$install_time" "$install_time" > "${mods_info_path}${mod_string[$i]}.ogpmod"'."\n".
+							 '	printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "${mod_string[$i]}" "$mod_id" "${mod_name[$i]}" "$installed_folder" "$installed_path" "$workshop_id" "installed" "$install_time" "$install_time" > "${mods_info_home_path}${mod_id}.gspmod"'."\n".
+							 '	printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "${mod_string[$i]}" "$mod_id" "${mod_name[$i]}" "$installed_folder" "$installed_path" "$workshop_id" "installed" "$install_time" "$install_time" > "${mods_info_path}${mod_string[$i]}.gspmod"'."\n".
 							 '	i=$(expr $i + 1)'."\n".
 							 'done'."\n".
 							 'write_workshop_status completed "Workshop install completed"'."\n".
@@ -6678,7 +6672,7 @@ sub get_workshop_mods_info()
 		my @mods_info;
 		while(my $mod_info_file = readdir(MODS_INFO_DIR))
 		{
-			if($mod_info_file =~ /\.ogpmod$/)
+			if($mod_info_file =~ /\.gspmod$/)
 			{
 				my $mod_info_file_path = Path::Class::File->new($mods_info_dir_path, $mod_info_file);
 				if(open(my $fh, '<:encoding(UTF-8)', $mod_info_file_path))
@@ -6687,7 +6681,7 @@ sub get_workshop_mods_info()
 					chomp $row;
 					if($row ne "")
 					{
-						my ($string_name, $ext) = split(/\.ogp/, $mod_info_file);
+						my ($string_name, $ext) = split(/\.gsp/, $mod_info_file);
 						if(index($row, "\t") >= 0)
 						{
 							push @mods_info, $row;

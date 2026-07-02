@@ -28,7 +28,7 @@ The script may show normal `needrestart` output about services, kernels, or VM g
 ## Guided Installation
 
 ```bash
-chmod +x install.sh agent_conf.sh gsp_agent_run ogp_agent_run
+chmod +x install.sh agent_conf.sh gsp_agent_run gsp_agent_run
 sudo ./install.sh
 ```
 
@@ -76,8 +76,8 @@ Important `Preferences.pm` keys:
 
 Compatibility aliases are still written for older panel/agent paths:
 
-- `ogp_manages_ftp`
-- `ogp_autorestart_server`
+- `gsp_manages_ftp`
+- `gsp_autorestart_server`
 
 ## Folder Layout
 
@@ -136,7 +136,7 @@ Use noninteractive flags when automating:
   --key CHANGE_ME \
   --listen-ip 0.0.0.0 \
   --listen-port 12679 \
-  --web-api-url https://panel.example.com/ogp_api.php \
+  --web-api-url https://panel.example.com/gsp_api.php \
   --agent-event-url https://panel.example.com/agent_event_receiver.php \
   --remote-server-id 1
 ```
@@ -164,7 +164,7 @@ Polkit or systemctl authentication failure:
 - do not start with a non-root partial install
 - inspect `sudo journalctl -u gsp_agent -f`
 
-Wrong install path or old `/home/gameserver/OGP` log path:
+Wrong install path or old `/home/gameserver/GSP` log path:
 
 - rerun `./agent_conf.sh --guided --install-dir /home/gameserver/GSP`
 - confirm `Cfg/Config.pm` has `logfile => '/home/gameserver/GSP/gsp_agent.log'`
@@ -179,7 +179,7 @@ Service failed:
 
 - run `sudo systemctl status gsp_agent`
 - run `sudo journalctl -u gsp_agent -f`
-- run `perl -c /home/gameserver/GSP/ogp_agent.pl`
+- run `perl -c /home/gameserver/GSP/gsp_agent.pl`
 
 Config missing or invalid:
 

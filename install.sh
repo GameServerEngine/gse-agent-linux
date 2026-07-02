@@ -167,7 +167,7 @@ mkdir -p \
 
 touch "${INSTALL_DIR}/_gsp_content/runtime/server_content.pids"
 
-chmod +x "${INSTALL_DIR}/gsp_agent_run" "${INSTALL_DIR}/ogp_agent_run" "${INSTALL_DIR}/agent_conf.sh" "${INSTALL_DIR}/install_agent_prereqs.sh" 2>/dev/null || true
+chmod +x "${INSTALL_DIR}/gsp_agent_run" "${INSTALL_DIR}/agent_conf.sh" "${INSTALL_DIR}/install_agent_prereqs.sh" 2>/dev/null || true
 chown -R "${AGENT_USER}:${AGENT_USER}" "$INSTALL_DIR"
 
 echo

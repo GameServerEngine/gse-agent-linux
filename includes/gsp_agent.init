@@ -2,14 +2,14 @@
 
 # Generic Init script if we can't find what kind of Linux we're on
 
-agent_dir=OGP_AGENT_DIR
-agent_user=OGP_USER
+agent_dir=GSP_AGENT_DIR
+agent_user=GSP_USER
 
 # Start function.
 start() {
     echo "Starting GSP Agent..."
     cd $agent_dir
-    su -c "screen -d -m -t gsp_agent -c ogp_screenrc -S gsp_agent ./gsp_agent_run -pidfile gsp_agent_run.pid" $agent_user &> $agent_dir/gsp_agent.svc &
+    su -c "screen -d -m -t gsp_agent -c gsp_screenrc -S gsp_agent ./gsp_agent_run -pidfile gsp_agent_run.pid" $agent_user &> $agent_dir/gsp_agent.svc &
     echo
 }
 

@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-echo "ogp_agent_run is a legacy compatibility wrapper. Use gsp_agent_run for new GSP installs." >&2
-exec "${SCRIPT_DIR}/gsp_agent_run" "$@"
