@@ -39,3 +39,34 @@ The Linux agent prepares this runtime layout for generated content hooks:
 - `_gsp_content/runtime/server_content.pids`
 
 During stop/restart, hook watchdog PIDs are cleaned up before hook application PIDs. Main game server watchdog PIDs should not be written to `server_content.pids`.
+
+## Agent Operations RPCs
+
+The Linux agent exposes these structured RPCs for the Admin -> Servers per-agent interface:
+
+- `agent_version` returns OS, agent version, and install path.
+- `agent_resource_snapshot` returns CPU, RAM, disk, load average, OS, version, and install path for Panel-side caching.
+- `force_stop_server(home_id, server_ip, server_port, home_path)` removes the matching startup flag, marks `FORCE_STOPPING`, kills only tracked PID/session targets and the process owning the assigned game port, verifies session/process/port are stopped, and returns a structured result. It never restarts the game server.
+- `agent_self_update(payload)` queues a detached self-update.
+- `agent_update_status` returns the latest `gsp_agent_update_state.json` content.
+
+## Self-Update And Rollback
+
+The self-updater stages the requested component from an allowlisted repo/branch/source path, validates `gsp_agent.pl` with `perl -c`, creates a timestamped backup, copies staged files into the active agent directory, and restarts the agent through `gsp_agent.service` when present or the local run wrapper otherwise.
+
+The updater preserves host/customer data and local config:
+
+- `Cfg/`
+- `ServerFiles/`
+- `Schedule/`
+- `logs/`
+- `screenlogs/`
+- `steamcmd/`
+- `startups/`
+- `runtime_status/`
+- `events/`
+- `tmp/`
+- `shared/`
+- PID files
+
+If the updated agent does not listen on its RPC port before the timeout, the updater stops the failed instance, restores the backup, starts the previous agent, and records `rolled_back` or `failed` in `gsp_agent_update_state.json`.

@@ -95,6 +95,10 @@ use constant AGENT_EVENTS_DIR =>
 	Path::Class::Dir->new(AGENT_RUN_DIR, 'events');
 use constant AGENT_EVENT_QUEUE_FILE =>
 	Path::Class::File->new(AGENT_EVENTS_DIR, 'pending-events.jsonl');
+use constant AGENT_UPDATE_STATE_FILE =>
+	Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent_update_state.json');
+use constant AGENT_UPDATE_LOG_FILE =>
+	Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent_update.log');
 use constant SCREENRC_FILE =>
   Path::Class::File->new(AGENT_RUN_DIR, 'gsp_screenrc');
 use constant SCREENRC_FILE_BK =>
@@ -710,6 +714,7 @@ my $d = Frontier::Daemon::GSP::Forking->new(
 			 methods => {
 					 is_screen_running				=> \&is_screen_running,
 					 server_status					=> \&server_status,
+					 force_stop_server				=> \&force_stop_server,
 					 universal_start			  	=> \&universal_start,
 				 renice_process					=> \&renice_process,
 				 cpu_count						=> \&cpu_count,
@@ -734,6 +739,8 @@ my $d = Frontier::Daemon::GSP::Forking->new(
 				 uncompress_file			  	=> \&uncompress_file,
 				 discover_ips					=> \&discover_ips,
 				 mon_stats						=> \&mon_stats,
+				 agent_resource_snapshot			=> \&agent_resource_snapshot,
+				 agent_version					=> \&agent_version,
 				 exec						 	=> \&exec,
 				 clone_home				   		=> \&clone_home,
 				 remove_home					=> \&remove_home,
@@ -756,6 +763,8 @@ my $d = Frontier::Daemon::GSP::Forking->new(
 				 fastdl_create_config			=> \&fastdl_create_config,
 				 agent_restart					=> \&agent_restart,
 				 component_update				=> \&component_update,
+				 agent_self_update				=> \&agent_self_update,
+				 agent_update_status				=> \&agent_update_status,
 				 scheduler_add_task				=> \&scheduler_add_task,
 				 scheduler_del_task				=> \&scheduler_del_task,
 				 scheduler_list_tasks			=> \&scheduler_list_tasks,
@@ -2443,6 +2452,82 @@ sub verify_runtime_stop_complete_without_decrypt
 		message => "Server stop confirmed after escalation."
 	});
 	return 0;
+}
+
+sub force_stop_server
+{
+	return component_update_response(success => 0, status => 'bad_encryption', message => 'Bad Encryption Key')
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my ($home_id, $server_ip, $server_port, $home_path) = decrypt_params(@_);
+	return force_stop_server_without_decrypt($home_id, $server_ip, $server_port, $home_path);
+}
+
+sub force_stop_server_without_decrypt
+{
+	my ($home_id, $server_ip, $server_port, $home_path) = @_;
+	if(!defined($home_id) || $home_id !~ /^[0-9]+$/ || !defined($server_port) || $server_port !~ /^[0-9]+$/ || $server_port < 1 || $server_port > 65535)
+	{
+		return component_update_response(success => 0, status => 'invalid_target', message => 'Invalid force-stop target.', home_id => $home_id || '', ip => $server_ip || '', port => $server_port || '');
+	}
+	write_status_hint($home_id, "FORCE_STOPPING");
+	my $startup_file = Path::Class::File->new(GAME_STARTUP_DIR, "$server_ip-$server_port");
+	unlink($startup_file) if(-e $startup_file);
+
+	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
+	my $as_user = find_user_by_screen_id($screen_id);
+	cleanup_server_content_hooks_without_decrypt($home_path, $as_user) if(defined($home_path) && $home_path ne "");
+	my $pid_meta = read_pid_metadata($home_id);
+	my @attempted_pids = ();
+	push(@attempted_pids, $pid_meta->{game_pid}) if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/);
+	push(@attempted_pids, $pid_meta->{screen_pid}) if(defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/);
+	my $screen_pid = get_screen_pid_without_decrypt($home_id);
+	push(@attempted_pids, $screen_pid) if($screen_pid =~ /^\d+$/);
+	my $port_pid = find_process_pid_by_port_without_decrypt($server_port, "any");
+	push(@attempted_pids, $port_pid) if($port_pid =~ /^\d+$/);
+	my %seen_attempt;
+	@attempted_pids = grep { !$seen_attempt{$_}++ } @attempted_pids;
+
+	logger "Force stop requested for HOME ID:$home_id $server_ip:$server_port.";
+	sudo_exec_without_decrypt('screen -S '.$screen_id.' -X quit', $as_user);
+	sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
+	force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
+	my $verify = verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port);
+
+	my $session_running = is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1 ? 1 : 0;
+	my $process_running = 0;
+	my @remaining = ();
+	foreach my $pid (@attempted_pids)
+	{
+		if($pid =~ /^\d+$/ && is_pid_alive_without_decrypt($pid))
+		{
+			$process_running = 1;
+			push(@remaining, $pid);
+		}
+	}
+	my $port_listening = is_port_listening_without_decrypt($server_ip, $server_port);
+	my $success = (!$session_running && !$process_running && !$port_listening && $verify == 0) ? 1 : 0;
+	my $message = $success ? 'Force Stop completed. The game server was not restarted.' : 'Force Stop could not fully stop the server. Review remaining process/session/port state.';
+	queue_agent_event($success ? "server_force_stop_confirmed" : "server_force_stop_failed", $success ? "warning" : "error", {
+		home_id => $home_id,
+		ip => $server_ip,
+		game_port => $server_port,
+		message => $message
+	});
+	return component_update_response(
+		success => $success,
+		status => $success ? 'STOPPED' : 'UNRESPONSIVE',
+		message => $message,
+		home_id => $home_id,
+		ip => $server_ip,
+		port => $server_port,
+		session_running => $session_running,
+		process_running => $process_running,
+		port_listening => $port_listening,
+		attempted_pids => join(',', @attempted_pids),
+		killed_pids => join(',', @attempted_pids),
+		remaining_pids => join(',', @remaining),
+		log_hint => AGENT_LOG_FILE
+	);
 }
 
 ##### Send RCON command
@@ -5446,6 +5531,217 @@ sub fastdl_create_config
 	}
 	logger "$settings file written successfully.";
 	return 1;
+}
+
+sub agent_read_first_line
+{
+	my ($path) = @_;
+	return "" unless(open(my $fh, '<', $path));
+	my $line = <$fh>;
+	close($fh);
+	chomp($line) if(defined($line));
+	return defined($line) ? $line : "";
+}
+
+sub agent_cpu_usage_percent
+{
+	my $first = agent_read_first_line('/proc/stat');
+	return "" unless($first =~ /^cpu\s+/);
+	my @a = split(/\s+/, $first);
+	sleep 1;
+	my $second = agent_read_first_line('/proc/stat');
+	return "" unless($second =~ /^cpu\s+/);
+	my @b = split(/\s+/, $second);
+	my ($idle_a, $idle_b) = ($a[4] || 0, $b[4] || 0);
+	my ($total_a, $total_b) = (0, 0);
+	for(my $i = 1; $i < @a; $i++) { $total_a += $a[$i] || 0; }
+	for(my $i = 1; $i < @b; $i++) { $total_b += $b[$i] || 0; }
+	my $total = $total_b - $total_a;
+	return "" if($total <= 0);
+	return sprintf("%.2f", 100 * (($total - ($idle_b - $idle_a)) / $total));
+}
+
+sub agent_ram_usage_percent
+{
+	my ($total, $available, $free, $buffers, $cached) = (0, 0, 0, 0, 0);
+	return "" unless(open(my $fh, '<', '/proc/meminfo'));
+	while(my $line = <$fh>)
+	{
+		$total = $1 if($line =~ /^MemTotal:\s+([0-9]+)\s+kB/);
+		$available = $1 if($line =~ /^MemAvailable:\s+([0-9]+)\s+kB/);
+		$free = $1 if($line =~ /^MemFree:\s+([0-9]+)\s+kB/);
+		$buffers = $1 if($line =~ /^Buffers:\s+([0-9]+)\s+kB/);
+		$cached = $1 if($line =~ /^Cached:\s+([0-9]+)\s+kB/);
+	}
+	close($fh);
+	return "" if($total <= 0);
+	my $used = $available > 0 ? $total - $available : $total - $free - $buffers - $cached;
+	return sprintf("%.2f", 100 * ($used / $total));
+}
+
+sub agent_disk_usage_percent
+{
+	my @lines = `df -P -x tmpfs -x devtmpfs 2>/dev/null`;
+	my $max = "";
+	foreach my $line (@lines)
+	{
+		next unless($line =~ /\s([0-9]{1,3})%\s+\S+\s*$/);
+		$max = $1 if($max eq "" || $1 > $max);
+	}
+	return $max eq "" ? "" : sprintf("%.2f", $max);
+}
+
+sub agent_version
+{
+	return component_update_response(success => 0, status => 'bad_encryption', message => 'Bad Encryption Key')
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	return component_update_response(success => 1, status => 'ok', agent_version => AGENT_VERSION, os => `uname -s 2>/dev/null`, install_path => AGENT_RUN_DIR);
+}
+
+sub agent_resource_snapshot
+{
+	return component_update_response(success => 0, status => 'bad_encryption', message => 'Bad Encryption Key')
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my $load = agent_read_first_line('/proc/loadavg');
+	$load =~ s/\s+$//;
+	my $os = `uname -sr 2>/dev/null`;
+	chomp($os);
+	return component_update_response(
+		success => 1,
+		status => 'ok',
+		message => 'Resource snapshot collected.',
+		os => $os,
+		agent_version => AGENT_VERSION,
+		install_path => AGENT_RUN_DIR,
+		cpu_percent => agent_cpu_usage_percent(),
+		ram_percent => agent_ram_usage_percent(),
+		disk_percent => agent_disk_usage_percent(),
+		load_average => $load
+	);
+}
+
+sub agent_update_status
+{
+	return component_update_response(success => 0, status => 'bad_encryption', message => 'Bad Encryption Key')
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my %data = (success => 0, status => 'not_started', message => 'No agent update has been recorded.', state_path => AGENT_UPDATE_STATE_FILE, log_path => AGENT_UPDATE_LOG_FILE);
+	if(open(my $fh, '<', AGENT_UPDATE_STATE_FILE))
+	{
+		local $/;
+		my $json = <$fh>;
+		close($fh);
+		my $decoded = eval { decode_json($json) };
+		if(ref($decoded) eq 'HASH')
+		{
+			%data = (%data, %$decoded);
+			$data{success} = ($data{status} && $data{status} eq 'succeeded') ? 1 : 0;
+		}
+	}
+	return component_update_response(%data);
+}
+
+sub agent_self_update
+{
+	return component_update_response(success => 0, status => 'bad_encryption', message => 'Bad Encryption Key')
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my ($payload) = decrypt_params(@_);
+	my %cfg = component_update_parse_payload($payload);
+	my $component = $cfg{component} || 'linux_agent';
+	my $repo_url = $cfg{repo_url} || '';
+	my $branch = $cfg{branch} || '';
+	my $source_path = $cfg{source_path} || '';
+	my $timeout = ($cfg{timeout} && $cfg{timeout} =~ /^[0-9]+$/) ? $cfg{timeout} : 60;
+	return component_update_response(success => 0, status => 'invalid_component', message => 'Invalid component.') if($component ne 'linux_agent' && $component ne 'windows_agent');
+	return component_update_response(success => 0, status => 'invalid_repo', message => 'Invalid repository URL or path.') if($repo_url !~ m{^(https?://|ssh://|git@|/)} || $repo_url =~ /[\r\n\0]/);
+	return component_update_response(success => 0, status => 'invalid_branch', message => 'Invalid branch.') if($branch !~ /^[A-Za-z0-9._\/-]{1,128}$/);
+	return component_update_response(success => 0, status => 'invalid_source_path', message => 'Invalid source path.') if($source_path eq '' || $source_path =~ /\.\./ || $source_path =~ /[\r\n\0]/ || $source_path !~ /^[A-Za-z0-9._\/-]+$/);
+
+	my $ts = time();
+	my $script_path = Path::Class::File->new(AGENT_RUN_DIR, "gsp_agent_self_update_$ts.sh")->stringify;
+	my $repo_q = component_update_shell_quote($repo_url);
+	my $branch_q = component_update_shell_quote($branch);
+	my $source_q = component_update_shell_quote($source_path);
+	my $dest_q = component_update_shell_quote(AGENT_RUN_DIR);
+	my $state_q = component_update_shell_quote(AGENT_UPDATE_STATE_FILE);
+	my $log_q = component_update_shell_quote(AGENT_UPDATE_LOG_FILE);
+	my $screenrc_q = component_update_shell_quote(SCREENRC_FILE);
+	my $agent_ip_q = component_update_shell_quote(AGENT_IP eq '0.0.0.0' ? '127.0.0.1' : AGENT_IP);
+	my $agent_port_q = component_update_shell_quote(AGENT_PORT);
+	my $version_q = component_update_shell_quote(AGENT_VERSION);
+	my $timeout_q = component_update_shell_quote($timeout);
+	my $component_q = component_update_shell_quote($component);
+	my $script = <<"EOS";
+#!/usr/bin/env bash
+set -u
+LOG=$log_q
+STATE=$state_q
+DEST=$dest_q
+REPO=$repo_q
+BRANCH=$branch_q
+SOURCE_REL=$source_q
+SCREENRC=$screenrc_q
+AGENT_HOST=$agent_ip_q
+AGENT_PORT=$agent_port_q
+VERSION_BEFORE=$version_q
+TIMEOUT=$timeout_q
+COMPONENT=$component_q
+BACKUP_BASE="\$DEST/agent_self_update_backups"
+TMP="\${TMPDIR:-/tmp}/gsp_self_update_\$(date +%s)_\$\$"
+json_escape(){ printf '%s' "\$1" | sed 's/[\\\\"]/ /g'; }
+state(){ printf '{"status":"%s","message":"%s","update_id":"%s","log_path":"%s","state_path":"%s","rollback_performed":"%s","version_before":"%s","version_after":"%s"}\\n' "\$1" "\$(json_escape "\$2")" "$ts" "\$LOG" "\$STATE" "\${ROLLBACK:-0}" "\$VERSION_BEFORE" "\${VERSION_AFTER:-}" > "\$STATE"; }
+log(){ printf '[%s] %s\\n' "\$(date '+%Y-%m-%d %H:%M:%S')" "\$*" >> "\$LOG"; }
+health(){ perl -MIO::Socket::INET -e 'my \$s=IO::Socket::INET->new(PeerAddr=>shift,PeerPort=>shift,Proto=>"tcp",Timeout=>2); exit(\$s?0:1)' "\$AGENT_HOST" "\$AGENT_PORT" >/dev/null 2>&1; }
+stop_agent(){ if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^gsp_agent\\.service'; then systemctl stop gsp_agent.service >> "\$LOG" 2>&1 || true; else [ -f "\$DEST/gsp_agent_run.pid" ] && kill "\$(cat "\$DEST/gsp_agent_run.pid")" >/dev/null 2>&1 || true; [ -f "\$DEST/gsp_agent.pid" ] && kill "\$(cat "\$DEST/gsp_agent.pid")" >/dev/null 2>&1 || true; fi; }
+start_agent(){ if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^gsp_agent\\.service'; then systemctl start gsp_agent.service >> "\$LOG" 2>&1 || true; else cd "\$DEST" || return 1; if [ -f gsp_agent_run ]; then screen -d -m -t "gsp_agent" -c "\$SCREENRC" -S gsp_agent bash gsp_agent_run -pidfile gsp_agent_run.pid >> "\$LOG" 2>&1 || true; else screen -d -m -t "gsp_agent" -c "\$SCREENRC" -S gsp_agent perl gsp_agent.pl >> "\$LOG" 2>&1 || true; fi; fi; }
+verify_started(){ i=0; while [ "\$i" -lt "\$TIMEOUT" ]; do health && return 0; sleep 2; i=\$((i+2)); done; return 1; }
+ROLLBACK=0
+state in_progress "Preparing self-update"
+mkdir -p "\$TMP" "\$BACKUP_BASE" || { state failed "Cannot create staging or backup directory"; exit 1; }
+log "Self-update queued component=\$COMPONENT repo=\$REPO branch=\$BRANCH source=\$SOURCE_REL dest=\$DEST"
+git clone --depth 1 --branch "\$BRANCH" "\$REPO" "\$TMP/repo" >> "\$LOG" 2>&1 || { state failed "git clone failed"; exit 1; }
+SRC="\$TMP/repo/\$SOURCE_REL"
+[ -d "\$SRC" ] || { state failed "Source component folder missing"; exit 1; }
+[ -s "\$SRC/gsp_agent.pl" ] || { state failed "Staged gsp_agent.pl missing or empty"; exit 1; }
+if grep -Eqi '<html|not found|404' "\$SRC/gsp_agent.pl"; then state failed "Staged gsp_agent.pl looks like an HTTP error page"; exit 1; fi
+perl -c "\$SRC/gsp_agent.pl" >> "\$LOG" 2>&1 || { state failed "Staged gsp_agent.pl failed syntax validation"; exit 1; }
+ARCHIVE="\$BACKUP_BASE/\${COMPONENT}_\$(date +%Y%m%d_%H%M%S).tar.gz"
+tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./runtime_status' --exclude='./events' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./agent_self_update_backups' --exclude='./*.pid' -czf "\$ARCHIVE" -C "\$DEST" . >> "\$LOG" 2>&1 || { state failed "Backup failed"; exit 1; }
+state in_progress "Installing staged files"
+if command -v rsync >/dev/null 2>&1; then
+  rsync -a --exclude='Cfg/' --exclude='ServerFiles/' --exclude='Schedule/' --exclude='logs/' --exclude='screenlogs/' --exclude='steamcmd/' --exclude='startups/' --exclude='runtime_status/' --exclude='events/' --exclude='tmp/' --exclude='shared/' --exclude='component_backups/' --exclude='agent_self_update_backups/' --exclude='*.pid' "\$SRC"/ "\$DEST"/ >> "\$LOG" 2>&1 || { state failed "rsync copy failed"; exit 1; }
+else
+  (cd "\$SRC" && tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./runtime_status' --exclude='./events' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./agent_self_update_backups' --exclude='./*.pid' -cf - .) | (cd "\$DEST" && tar -xf -) >> "\$LOG" 2>&1 || { state failed "tar copy failed"; exit 1; }
+fi
+VERSION_AFTER="\$(grep -E \"version.*=>\" "\$DEST/Cfg/Config.pm" 2>/dev/null | head -1 | sed -E \"s/.*=>[[:space:]]*['\\\"]?([^,'\\\"]+).*/\\1/\")"
+state in_progress "Restarting updated agent"
+stop_agent
+sleep 2
+start_agent
+if verify_started; then state succeeded "Updated agent started and responded on its RPC port"; rm -rf "\$TMP"; exit 0; fi
+ROLLBACK=1
+state rolled_back "Updated agent did not respond; rolling back"
+stop_agent
+tar -xzf "\$ARCHIVE" -C "\$DEST" >> "\$LOG" 2>&1 || { state failed "Rollback restore failed"; exit 1; }
+start_agent
+if verify_started; then state rolled_back "Rollback restored previous agent and it responded"; else state failed "Rollback attempted but previous agent did not respond"; fi
+rm -rf "\$TMP"
+exit 0
+EOS
+	my $fh;
+	if(!open($fh, '>', $script_path))
+	{
+		return component_update_response(success => 0, status => 'write_failed', message => "Cannot write updater script: $!");
+	}
+	print $fh $script;
+	close($fh);
+	chmod 0700, $script_path;
+	system('screen -d -m -t "agent_self_update" -c "' . SCREENRC_FILE . '" -S agent_self_update bash ' . component_update_shell_quote($script_path));
+	if($? != 0)
+	{
+		system('bash ' . component_update_shell_quote($script_path) . ' >/dev/null 2>&1 &');
+	}
+	logger "Agent self-update queued for $component from $repo_url branch $branch.";
+	return component_update_response(success => 1, status => 'queued', message => 'Agent self-update queued. Poll update status for the final result.', update_id => $ts, log_path => AGENT_UPDATE_LOG_FILE, state_path => AGENT_UPDATE_STATE_FILE, rollback_performed => 0, version_before => AGENT_VERSION);
 }
 
 sub component_update_shell_quote
