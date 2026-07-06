@@ -120,11 +120,13 @@ our $SUDOPASSWD = $Cfg::Config{sudo_password};
 my $no_startups	= 0;
 my $clear_startups = 0;
 our $log_std_out = 0;
+my $agent_pid_file = AGENT_PID_FILE;
 
 GetOptions(
 		   'no-startups'	=> \$no_startups,
 		   'clear-startups' => \$clear_startups,
-		   'log-stdout'	 => \$log_std_out
+		   'log-stdout'	 => \$log_std_out,
+		   'pidfile=s'	 => \$agent_pid_file
 		  );
 
 sub preference_value
@@ -648,8 +650,8 @@ elsif ($no_startups != 1)
 }
 
 # Create the pid file
-open(PID, '>', AGENT_PID_FILE)
-  or die("Can't write to pid file - " . AGENT_PID_FILE . "\n");
+open(PID, '>', $agent_pid_file)
+  or die("Can't write to pid file - " . $agent_pid_file . "\n");
 print PID "$$\n";
 close(PID);
 
