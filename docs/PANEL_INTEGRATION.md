@@ -44,8 +44,8 @@ During stop/restart, hook watchdog PIDs are cleaned up before hook application P
 
 The Linux agent exposes these structured RPCs for the Admin -> Servers per-agent interface:
 
-- `agent_version` returns OS, agent version, and install path.
-- `agent_resource_snapshot` returns CPU, RAM, disk, load average, OS, version, and install path for Panel-side caching.
+- `agent_version` returns OS, agent code build version, and install path. The code build version is used even when legacy config files still contain an old `version` value.
+- `agent_resource_snapshot` returns CPU, RAM, disk, load average, OS, code build version, and install path for Panel-side caching.
 - `force_stop_server(home_id, server_ip, server_port, home_path)` removes the matching startup flag, marks `FORCE_STOPPING`, kills only tracked PID/session targets and the process owning the assigned game port, verifies session/process/port are stopped, and returns a structured result. It never restarts the game server.
 - `agent_self_update(payload)` queues a detached self-update.
 - `agent_update_status` returns the latest `gsp_agent_update_state.json` content.

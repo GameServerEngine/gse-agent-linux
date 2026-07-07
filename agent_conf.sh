@@ -193,9 +193,9 @@ EOF
 
 cat > "$bashprefsfile" <<EOF
 agent_auto_update=${auto_update}
-agent_update_repo_url=http://forge.runlevelsystems.com/dev/GSP.git
-agent_update_branch=Panel-unstable
-agent_update_raw_url=http://forge.runlevelsystems.com/dev/GSP/raw/branch/Panel-unstable/Agent-Linux/gsp_agent.pl
+agent_update_repo_url=https://git.runlevelsystems.com/GSP/GSP-Agent-Linux.git
+agent_update_branch=unstable
+agent_update_raw_url=https://git.runlevelsystems.com/GSP/GSP-Agent-Linux/raw/branch/unstable/gsp_agent.pl
 run_pureftpd=${ftp_managed}
 ftp_port=${ftp_port}
 ftp_ip=${ftp_ip}
