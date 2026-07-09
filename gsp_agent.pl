@@ -617,8 +617,9 @@ elsif ($no_startups != 1)
 	while (my $dirlist = readdir(STARTUPDIR))
 	{
 
-		# Skip . and ..
+		# Skip . and .. plus runtime marker files.
 		next if $dirlist =~ /^\./;
+		next if $dirlist =~ /^(?:status|pid)-/;
 		logger "Found $dirlist";
 		open(STARTFILE, '<', Path::Class::Dir->new(GAME_STARTUP_DIR, $dirlist))
 		  || logger "Error opening start flag $!";
@@ -944,65 +945,88 @@ sub create_screen_cmd
 
 }
 
+sub shell_single_quote
+{
+	my ($value) = @_;
+	$value = "" unless(defined($value));
+	$value =~ s/'/'"'"'/g;
+	return "'" . $value . "'";
+}
+
 sub create_screen_cmd_loop
 {
-	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file) = @_;
+	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file, $home_path, $game_workdir) = @_;
 	my $server_start_bashfile = $screen_id . "_startup_scr.sh";
 
 	$exec_cmd = replace_GSP_Env_Vars($screen_id, "", "", $exec_cmd);
+	$home_path = "." unless(defined($home_path) && $home_path ne "");
+	$game_workdir = "." unless(defined($game_workdir) && $game_workdir ne "");
 
-	# Allow file to be overwritten
+	my $quoted_home_path = shell_single_quote($home_path);
+	my $quoted_game_workdir = shell_single_quote($game_workdir);
+	my $quoted_exec_cmd = shell_single_quote($exec_cmd);
+
 	if(-e $server_start_bashfile){
 		secure_path_without_decrypt('chattr-i', $server_start_bashfile);
 	}
 
-	# Create bash file that screen will run which spawns the server
-	# If it crashes without user intervention, it will restart
 	open (SERV_START_SCRIPT, '>', $server_start_bashfile);
 
-	my $respawn_server_command = "#!/bin/bash" . "\n";
-
-	if(!$skipLoop){
-		$respawn_server_command .= "function startServer(){" . "\n";
-	}
+	my $watchdog_script = "#!/bin/bash\n"
+	. "set +e\n"
+	. "HOME_PATH=$quoted_home_path\n"
+	. "GAME_WORKDIR=$quoted_game_workdir\n"
+	. "GAME_COMMAND=$quoted_exec_cmd\n"
+	. "cd \"\$HOME_PATH\" || exit 1\n"
+	. "rm -f _alsoRun.bat _alsoRun.pid\n";
 
 	if(defined $envVars && $envVars ne ""){
-		$respawn_server_command .= $envVars;
+		$watchdog_script .= $envVars;
 	}
 
-	if(!$skipLoop){
-		$status_hint_file = "" unless(defined($status_hint_file));
-		$respawn_server_command .= "NUMSECONDS=`expr \$(date +%s)`" . "\n"
-		. "until " . $exec_cmd . "; do" . "\n"
-		. "let DIFF=(`date +%s` - \"\$NUMSECONDS\")" . "\n"
-		. "if [ \"\$DIFF\" -gt 15 ]; then" . "\n"
-		. "NUMSECONDS=`expr \$(date +%s)`" . "\n"
-		. "echo \"Server '" . $exec_cmd . "' crashed with exit code \$?.  Respawning...\" >&2 " . "\n"
-		. "fi" . "\n"
-		. "sleep 3" . "\n"
-		. "done" . "\n"
-		. "let DIFF=(`date +%s` - \"\$NUMSECONDS\")" . "\n"
-		. "if [ -f \"$status_hint_file\" ] && grep -E \"^[0-9]+,(STOPPING|STOPPED)$\" \"$status_hint_file\" >/dev/null 2>&1; then" . "\n"
-		. "exit 0" . "\n"
-		. "fi" . "\n"
-		. "if [ -n \"$status_hint_file\" ]; then echo \"`date +%s`,AUTORESTARTING\" > \"$status_hint_file\"; fi" . "\n"
-		. "if [ \"\$DIFF\" -gt 15 ]; then" . "\n"
-		. "startServer" . "\n"
-		. "fi" . "\n"
-		. "}" . "\n"
-		. "startServer" . "\n";
-	}else{
-		$respawn_server_command .= $exec_cmd . "\n";
-	}
+	$watchdog_script .= "BOT_WORKDIR=\"\"\n"
+	. "BOT_EXE=\"\"\n"
+	. "BOT_ARGS=\"\"\n"
+	. "if [ -f _alsoRun.cmd ]; then\n"
+	. "    while IFS='=' read -r key value; do\n"
+	. "        case \"\$key\" in\n"
+	. "            workdir) BOT_WORKDIR=\"\$value\" ;;\n"
+	. "            executable) BOT_EXE=\"\$value\" ;;\n"
+	. "            arguments) BOT_ARGS=\"\$value\" ;;\n"
+	. "        esac\n"
+	. "    done < _alsoRun.cmd\n"
+	. "fi\n"
+	. "while true; do\n"
+	. "    GAME_RUNNING=0\n"
+	. "    GAME_PID=\"\"\n"
+	. "    if [ -f game.pid ]; then GAME_PID=\$(cat game.pid 2>/dev/null); fi\n"
+	. "    if echo \"\$GAME_PID\" | grep -Eq '^[0-9]+$' && kill -0 \"\$GAME_PID\" >/dev/null 2>&1; then GAME_RUNNING=1; fi\n"
+	. "    if [ \"\$GAME_RUNNING\" = \"0\" ]; then\n"
+	. "        rm -f game.pid\n"
+	. "        ( cd \"\$GAME_WORKDIR\" && exec bash -lc \"exec \$GAME_COMMAND\" ) >/dev/null 2>&1 &\n"
+	. "        echo \$! > \"\$HOME_PATH/game.pid\"\n"
+	. "        sleep 5\n"
+	. "    fi\n"
+	. "    if [ -n \"\$BOT_WORKDIR\" ] && [ -n \"\$BOT_EXE\" ]; then\n"
+	. "        BOT_RUNNING=0\n"
+	. "        BOT_PID=\"\"\n"
+	. "        if [ -f bot.pid ]; then BOT_PID=\$(cat bot.pid 2>/dev/null); fi\n"
+	. "        if echo \"\$BOT_PID\" | grep -Eq '^[0-9]+$' && kill -0 \"\$BOT_PID\" >/dev/null 2>&1; then BOT_RUNNING=1; fi\n"
+	. "        if [ \"\$BOT_RUNNING\" = \"0\" ]; then\n"
+	. "            rm -f bot.pid\n"
+	. "            ( cd \"\$BOT_WORKDIR\" && exec \"\$BOT_EXE\" \$BOT_ARGS ) >/dev/null 2>&1 &\n"
+	. "            echo \$! > \"\$HOME_PATH/bot.pid\"\n"
+	. "            sleep 3\n"
+	. "        fi\n"
+	. "    fi\n"
+	. "    sleep 60\n"
+	. "done\n";
 
-	print SERV_START_SCRIPT $respawn_server_command;
+	print SERV_START_SCRIPT $watchdog_script;
 	close (SERV_START_SCRIPT);
 
-	# Make it not readable
 	my $readOnlyOwnerCmd = "chmod -Rf og-r '$server_start_bashfile'";
 	sudo_exec_without_decrypt($readOnlyOwnerCmd);
-
-	# Secure file
 	secure_path_without_decrypt('chattr+i', $server_start_bashfile);
 
 	my $screen_exec_script = "bash " . $server_start_bashfile;
@@ -1338,6 +1362,28 @@ sub find_process_pid_by_port_without_decrypt
 		return $pid if($pid =~ /^\d+$/);
 	}
 	return "";
+}
+
+sub kill_home_pid_files_without_decrypt
+{
+	my ($home_path, $as_user) = @_;
+	return unless(defined($home_path) && $home_path ne "");
+	foreach my $pid_name ("bot.pid", "game.pid")
+	{
+		my $pid_file = "$home_path/$pid_name";
+		if(open(my $PIDFILE, '<', $pid_file))
+		{
+			while(my $pid = <$PIDFILE>)
+			{
+				chomp($pid);
+				next unless($pid =~ /^\d+$/);
+				logger "Attempting forced stop for $pid_name PID $pid.";
+				kill_pid_with_escalation_without_decrypt($pid, $as_user);
+			}
+			close($PIDFILE);
+		}
+		unlink($pid_file) if(-e $pid_file);
+	}
 }
 
 sub force_kill_tracked_and_port_without_decrypt
@@ -1719,9 +1765,9 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file, $home_path, $game_binary_dir);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
 		}
 	}
 	elsif($file_extension eq ".jar")
@@ -1734,9 +1780,9 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file, $home_path, $game_binary_dir);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
 		}
 	}
 	else
@@ -1749,9 +1795,9 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file, $home_path, $game_binary_dir);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
 		}
 	}
 
@@ -2192,6 +2238,11 @@ sub stop_server_without_decrypt
 	my $as_user = find_user_by_screen_id($screen_id);
 	cleanup_server_content_hooks_without_decrypt($home_path, $as_user);
 
+	# Stop the owning screen/watchdog first, then kill the captured game/bot PIDs from the home folder.
+	sudo_exec_without_decrypt('screen -S '.$screen_id.' -X quit', $as_user);
+	sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
+	kill_home_pid_files_without_decrypt($home_path, $as_user);
+
 	if ($control_password !~ /^\s*$/ and $control_protocol ne "")
 	{
 		if ($control_protocol eq "rcon")
@@ -2493,6 +2544,7 @@ sub force_stop_server_without_decrypt
 	logger "Force stop requested for HOME ID:$home_id $server_ip:$server_port.";
 	sudo_exec_without_decrypt('screen -S '.$screen_id.' -X quit', $as_user);
 	sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
+	kill_home_pid_files_without_decrypt($home_path, $as_user) if(defined($home_path) && $home_path ne "");
 	force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
 	my $verify = verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port);
 
