@@ -48,14 +48,23 @@ The Linux agent exposes these structured RPCs for the Admin -> Servers per-agent
 - `agent_version` returns OS, agent code build version, and install path. The code build version is used even when legacy config files still contain an old `version` value.
 - `agent_resource_snapshot` returns CPU, RAM, disk, load average, OS, code build version, and install path for Panel-side caching.
 - `force_stop_server(home_id, server_ip, server_port, home_path)` removes the matching startup flag, marks `FORCE_STOPPING`, kills only tracked PID/session targets and the process owning the assigned game port, verifies session/process/port are stopped, and returns a structured result. It never restarts the game server.
-- `agent_self_update(payload)` queues a detached self-update.
+- `agent_self_update(payload)` records a pending restart-time update request.
 - `agent_update_status` returns the latest `gsp_agent_update_state.json` content.
 
 ## Self-Update And Rollback
 
-The self-updater stages the requested component from an allowlisted repo/branch/source path, validates `gsp_agent.pl` with `perl -c`, creates a timestamped backup, copies staged files into the active agent directory, and restarts the agent through `gsp_agent.service` when present or the local run wrapper otherwise.
+The running agent never replaces its own files. The Panel sends an `agent_self_update` request with `component`, `repo_url`, `branch`, and `source_path`; the Linux agent validates those fields, writes `gsp_agent_update_request.json`, and records `pending` in `gsp_agent_update_state.json`.
 
-Restart-time updates are local wrapper behavior, not Panel business logic. When `agent_auto_update=1`, `gsp_agent_run` uses `agent_update_repo_url`, `agent_update_branch`, and `agent_update_source_path` from `Cfg/bash_prefs.cfg`, validates staged code, creates one local restart-update backup, writes `gsp_agent_update_state.json`, and suppresses repeated attempts for a revision that already failed.
+Restart-time updates are local wrapper behavior, not Panel business logic. On the next normal service or foreground restart, `gsp_agent_run` checks `agent_auto_update=1` in `Cfg/bash_prefs.cfg` and the pending request. It stages the requested Git repo/branch/source path, validates `gsp_agent.pl` with `perl -c`, validates `gsp_agent_run` with `bash -n` when present, creates one local restart-update backup, copies staged files into place, records the result, and then starts the agent.
+
+The restart-time update config keys are:
+
+- `agent_auto_update`
+- `agent_update_repo_url`
+- `agent_update_branch`
+- `agent_update_source_path`
+
+The shared update state contract uses `pending`, `running`, `completed`, `failed`, and `rolled_back`. Terminal failures remove the pending request so a failed request does not retry on every restart without a new Panel request.
 
 The updater preserves host/customer data and local config:
 

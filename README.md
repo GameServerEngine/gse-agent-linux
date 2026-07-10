@@ -54,7 +54,7 @@ Generated files:
 - `Cfg/Preferences.pm`
 - `Cfg/bash_prefs.cfg`
 
-`Cfg/bash_prefs.cfg` controls restart-time updates from the configured Git repo and branch. The service and foreground wrapper both use `gsp_agent_run`; the wrapper refuses duplicate startup when the configured agent port or a valid wrapper lock is already active.
+`Cfg/bash_prefs.cfg` controls whether queued restart-time updates may run. The running agent records `agent_self_update` requests as pending state, and `gsp_agent_run` applies them from the requested Git repo, branch, and source path before the agent starts. The service and foreground wrapper both use `gsp_agent_run`; the wrapper refuses duplicate startup when the configured agent port or a valid wrapper lock is already active.
 
 ## Documentation
 

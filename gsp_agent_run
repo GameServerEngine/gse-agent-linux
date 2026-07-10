@@ -8,6 +8,7 @@ BASH_PREFS_CONF="${AGENTDIR}/Cfg/bash_prefs.cfg"
 LOCK_FILE="${AGENTDIR}/gsp_agent_run.lock"
 DEFAULT_PID_FILE="${AGENTDIR}/gsp_agent_run.pid"
 STATE_FILE="${AGENTDIR}/gsp_agent_update_state.json"
+REQUEST_FILE="${AGENTDIR}/gsp_agent_update_request.json"
 UPDATE_LOG="${AGENTDIR}/gsp_agent_update.log"
 REVISION_FILE="${AGENTDIR}/.gsp_agent_source_revision"
 FAIL_MARKER="${AGENTDIR}/.gsp_agent_update_failed"
@@ -19,6 +20,10 @@ ROLLBACK_AVAILABLE=0
 UPDATE_VERSION_BEFORE=""
 UPDATE_APPLIED_AT=0
 UPDATE_FAILED_KEY=""
+UPDATE_ID=""
+UPDATE_REPO=""
+UPDATE_BRANCH=""
+UPDATE_SOURCE_PATH=""
 agent_args=()
 
 log() {
@@ -38,11 +43,51 @@ write_state() {
 	local message="$2"
 	local rollback="${3:-0}"
 	local revision="${4:-}"
+	local repo="${5:-$UPDATE_REPO}"
+	local branch="${6:-$UPDATE_BRANCH}"
+	local source_path="${7:-$UPDATE_SOURCE_PATH}"
+	local update_id="${UPDATE_ID:-restart-$(date +%s)}"
 	local version_before
 	version_before="${UPDATE_VERSION_BEFORE:-$(cat "$REVISION_FILE" 2>/dev/null || true)}"
 	mkdir -p "$(dirname "$STATE_FILE")"
-	printf '{"status":"%s","message":"%s","update_id":"restart-%s","log_path":"%s","state_path":"%s","rollback_performed":"%s","version_before":"%s","version_after":"%s"}\n' \
-		"$status" "$(json_escape "$message")" "$(date +%s)" "$UPDATE_LOG" "$STATE_FILE" "$rollback" "$version_before" "$revision" > "$STATE_FILE"
+	printf '{"status":"%s","message":"%s","update_id":"%s","log_path":"%s","state_path":"%s","request_path":"%s","rollback_performed":"%s","version_before":"%s","version_after":"%s","repo_url":"%s","branch":"%s","source_path":"%s","target_commit":"%s","current_commit":"%s"}\n' \
+		"$status" "$(json_escape "$message")" "$(json_escape "$update_id")" "$UPDATE_LOG" "$STATE_FILE" "$REQUEST_FILE" "$rollback" "$version_before" "$revision" "$(json_escape "$repo")" "$(json_escape "$branch")" "$(json_escape "$source_path")" "$revision" "$(cat "$REVISION_FILE" 2>/dev/null || true)" > "$STATE_FILE"
+}
+
+request_field() {
+	local key="$1"
+	local default_value="${2:-}"
+	[ -s "$REQUEST_FILE" ] || {
+		printf '%s' "$default_value"
+		return 0
+	}
+	perl -MJSON::PP -e '
+		my ($file, $key, $default) = @ARGV;
+		open my $fh, "<", $file or do { print $default; exit 0 };
+		local $/;
+		my $json = <$fh>;
+		my $data = eval { decode_json($json) };
+		if (ref($data) eq "HASH" && defined $data->{$key}) { print $data->{$key}; }
+		else { print $default; }
+	' "$REQUEST_FILE" "$key" "$default_value" 2>/dev/null
+}
+
+load_update_request() {
+	[ -s "$REQUEST_FILE" ] || return 1
+	UPDATE_ID="$(request_field update_id "")"
+	UPDATE_REPO="$(request_field repo_url "")"
+	UPDATE_BRANCH="$(request_field branch "unstable")"
+	UPDATE_SOURCE_PATH="$(request_field source_path ".")"
+	[ -n "$UPDATE_ID" ] || UPDATE_ID="restart-$(date +%s)"
+	[ -n "$UPDATE_REPO" ] || return 1
+	[[ "$UPDATE_REPO" =~ ^(https?://|ssh://|git@|/) && "$UPDATE_REPO" != *$'\n'* && "$UPDATE_REPO" != *$'\r'* ]] || return 1
+	[[ "$UPDATE_BRANCH" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || return 1
+	[[ "$UPDATE_SOURCE_PATH" =~ ^[A-Za-z0-9._/-]+$ && "$UPDATE_SOURCE_PATH" != *".."* ]] || return 1
+	return 0
+}
+
+clear_update_request() {
+	rm -f "$REQUEST_FILE" 2>/dev/null || true
 }
 
 read_pref() {
@@ -200,6 +245,9 @@ backup_current_agent() {
 		--exclude='./component_backups' \
 		--exclude='./agent_self_update_backups' \
 		--exclude='./agent_restart_update_backup.tar.gz' \
+		--exclude='./gsp_agent_update_state.json' \
+		--exclude='./gsp_agent_update_request.json' \
+		--exclude='./gsp_agent_update.log' \
 		--exclude='./*.pid' \
 		-czf "$tmp_archive" -C "$AGENTDIR" . >> "$UPDATE_LOG" 2>&1 && mv "$tmp_archive" "$BACKUP_ARCHIVE"
 }
@@ -225,6 +273,9 @@ copy_staged_source() {
 			--exclude='component_backups/' \
 			--exclude='agent_self_update_backups/' \
 			--exclude='agent_restart_update_backup.tar.gz' \
+			--exclude='gsp_agent_update_state.json' \
+			--exclude='gsp_agent_update_request.json' \
+			--exclude='gsp_agent_update.log' \
 			--exclude='*.pid' \
 			"${src%/}/" "${AGENTDIR}/" >> "$UPDATE_LOG" 2>&1
 	else
@@ -246,6 +297,9 @@ copy_staged_source() {
 			--exclude='./component_backups' \
 			--exclude='./agent_self_update_backups' \
 			--exclude='./agent_restart_update_backup.tar.gz' \
+			--exclude='./gsp_agent_update_state.json' \
+			--exclude='./gsp_agent_update_request.json' \
+			--exclude='./gsp_agent_update.log' \
 			--exclude='./*.pid' \
 			-cf - .) | (cd "$AGENTDIR" && tar -xf -) >> "$UPDATE_LOG" 2>&1
 	fi
@@ -258,57 +312,79 @@ restore_backup() {
 
 auto_update_on_restart() {
 	[ "${GSP_AGENT_SKIP_AUTO_UPDATE:-0}" = "1" ] && return 0
-	[ "$(read_pref agent_auto_update 0)" = "1" ] || return 0
+	[ -s "$REQUEST_FILE" ] || return 0
+	if [ "$(read_pref agent_auto_update 0)" != "1" ]; then
+		load_update_request || true
+		write_state pending "Pending update request not applied because agent_auto_update is disabled" 0 "$(cat "$REVISION_FILE" 2>/dev/null || true)"
+		return 0
+	fi
 
 	local repo branch source_path head current failed_key tmp_dir src changed_wrapper
-	repo="$(read_pref agent_update_repo_url "")"
-	branch="$(read_pref agent_update_branch "unstable")"
-	source_path="$(read_pref agent_update_source_path ".")"
+	if ! load_update_request; then
+		write_state failed "Pending update request is invalid" 0 "$(cat "$REVISION_FILE" 2>/dev/null || true)"
+		clear_update_request
+		return 0
+	fi
+	repo="$UPDATE_REPO"
+	branch="$UPDATE_BRANCH"
+	source_path="$UPDATE_SOURCE_PATH"
 	[ -n "$repo" ] || {
 		write_state failed "Restart-time update enabled but agent_update_repo_url is empty"
+		clear_update_request
 		return 0
 	}
 	[[ "$repo" =~ ^(https?://|ssh://|git@|/) && "$repo" != *$'\n'* && "$repo" != *$'\r'* ]] || {
 		write_state failed "Invalid restart-time update repository URL"
+		clear_update_request
 		return 0
 	}
 	[[ "$branch" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || {
 		write_state failed "Invalid restart-time update branch"
+		clear_update_request
 		return 0
 	}
 	[[ "$source_path" =~ ^[A-Za-z0-9._/-]+$ && "$source_path" != *".."* ]] || {
 		write_state failed "Invalid restart-time update source path"
+		clear_update_request
 		return 0
 	}
 
 	command -v git >/dev/null 2>&1 || {
 		write_state failed "git is required for restart-time update"
+		clear_update_request
 		return 0
 	}
 
 	head="$(git ls-remote --heads "$repo" "refs/heads/$branch" 2>>"$UPDATE_LOG" | awk '{print $1}' | head -n 1)"
 	[ -n "$head" ] || {
 		write_state failed "Could not resolve restart-time update branch"
+		clear_update_request
 		return 0
 	}
 	current="$(cat "$REVISION_FILE" 2>/dev/null || true)"
 	UPDATE_VERSION_BEFORE="$current"
-	[ "$current" = "$head" ] && return 0
+	if [ "$current" = "$head" ]; then
+		write_state completed "Agent is already at the requested revision" 0 "$head"
+		clear_update_request
+		return 0
+	fi
 
 	failed_key="${repo}|${branch}|${head}"
 	UPDATE_FAILED_KEY="$failed_key"
 	if [ -f "$FAIL_MARKER" ] && grep -qxF "$failed_key" "$FAIL_MARKER"; then
 		write_state failed "Skipping restart-time update after previous failure for this revision" 0 "$current"
+		clear_update_request
 		return 0
 	fi
 
 	tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/gsp-agent-restart-update.XXXXXX")"
-	write_state in_progress "Preparing restart-time update" 0 "$head"
-	log_update "Restart-time update repo=${repo} branch=${branch} revision=${head}"
+	write_state running "Preparing restart-time update" 0 "$head"
+	log_update "Restart-time queued update id=${UPDATE_ID} repo=${repo} branch=${branch} revision=${head}"
 
 	if ! git clone --depth 1 --branch "$branch" "$repo" "$tmp_dir/repo" >> "$UPDATE_LOG" 2>&1; then
 		printf '%s\n' "$failed_key" > "$FAIL_MARKER"
 		write_state failed "git clone failed" 0 "$current"
+		clear_update_request
 		rm -rf "$tmp_dir"
 		return 0
 	fi
@@ -316,6 +392,7 @@ auto_update_on_restart() {
 	src="$tmp_dir/repo/${source_path#./}"
 	if ! validate_staged_source "$src"; then
 		printf '%s\n' "$failed_key" > "$FAIL_MARKER"
+		clear_update_request
 		rm -rf "$tmp_dir"
 		return 0
 	fi
@@ -323,6 +400,7 @@ auto_update_on_restart() {
 	if ! backup_current_agent; then
 		printf '%s\n' "$failed_key" > "$FAIL_MARKER"
 		write_state failed "Backup failed" 0 "$current"
+		clear_update_request
 		rm -rf "$tmp_dir"
 		return 0
 	fi
@@ -333,11 +411,15 @@ auto_update_on_restart() {
 		changed_wrapper=1
 	fi
 
-	write_state in_progress "Installing staged files" 0 "$head"
+	write_state running "Installing staged files" 0 "$head"
 	if ! copy_staged_source "$src"; then
 		printf '%s\n' "$failed_key" > "$FAIL_MARKER"
-		write_state failed "Copy failed" 0 "$current"
-		restore_backup || true
+		if restore_backup; then
+			write_state rolled_back "Copy failed; restored previous files" 1 "$current"
+		else
+			write_state failed "Copy failed and rollback restore failed" 1 "$current"
+		fi
+		clear_update_request
 		rm -rf "$tmp_dir"
 		return 0
 	fi
@@ -345,8 +427,12 @@ auto_update_on_restart() {
 
 	if ! (cd "$AGENTDIR" && perl -c gsp_agent.pl >> "$UPDATE_LOG" 2>&1); then
 		printf '%s\n' "$failed_key" > "$FAIL_MARKER"
-		write_state rolled_back "Updated agent failed post-copy syntax validation" 1 "$current"
-		restore_backup || write_state failed "Rollback restore failed" 1 "$current"
+		if restore_backup; then
+			write_state rolled_back "Updated agent failed post-copy syntax validation; restored previous files" 1 "$current"
+		else
+			write_state failed "Updated agent failed post-copy syntax validation and rollback restore failed" 1 "$current"
+		fi
+		clear_update_request
 		rm -rf "$tmp_dir"
 		return 0
 	fi
@@ -355,7 +441,8 @@ auto_update_on_restart() {
 	rm -f "$FAIL_MARKER"
 	UPDATE_APPLIED=1
 	UPDATE_APPLIED_AT="$(date +%s)"
-	write_state succeeded "Restart-time update staged successfully" 0 "$head"
+	write_state completed "Restart-time update staged successfully" 0 "$head"
+	clear_update_request
 	rm -rf "$tmp_dir"
 
 	if [ "$changed_wrapper" -eq 1 ]; then

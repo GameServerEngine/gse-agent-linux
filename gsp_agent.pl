@@ -98,6 +98,8 @@ use constant AGENT_EVENT_QUEUE_FILE =>
 	Path::Class::File->new(AGENT_EVENTS_DIR, 'pending-events.jsonl');
 use constant AGENT_UPDATE_STATE_FILE =>
 	Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent_update_state.json');
+use constant AGENT_UPDATE_REQUEST_FILE =>
+	Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent_update_request.json');
 use constant AGENT_UPDATE_LOG_FILE =>
 	Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent_update.log');
 use constant SCREENRC_FILE =>
@@ -5679,7 +5681,7 @@ sub agent_update_status
 {
 	return component_update_response(success => 0, status => 'bad_encryption', message => 'Bad Encryption Key')
 		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
-	my %data = (success => 0, status => 'not_started', message => 'No agent update has been recorded.', state_path => AGENT_UPDATE_STATE_FILE, log_path => AGENT_UPDATE_LOG_FILE);
+	my %data = (success => 0, status => 'not_started', message => 'No agent update has been recorded.', state_path => AGENT_UPDATE_STATE_FILE, request_path => AGENT_UPDATE_REQUEST_FILE, log_path => AGENT_UPDATE_LOG_FILE);
 	if(open(my $fh, '<', AGENT_UPDATE_STATE_FILE))
 	{
 		local $/;
@@ -5689,7 +5691,7 @@ sub agent_update_status
 		if(ref($decoded) eq 'HASH')
 		{
 			%data = (%data, %$decoded);
-			$data{success} = ($data{status} && $data{status} eq 'succeeded') ? 1 : 0;
+			$data{success} = ($data{status} && $data{status} eq 'completed') ? 1 : 0;
 		}
 	}
 	return component_update_response(%data);
@@ -5712,91 +5714,66 @@ sub agent_self_update
 	return component_update_response(success => 0, status => 'invalid_source_path', message => 'Invalid source path.') if($source_path eq '' || $source_path =~ /\.\./ || $source_path =~ /[\r\n\0]/ || $source_path !~ /^[A-Za-z0-9._\/-]+$/);
 
 	my $ts = time();
-	my $script_path = Path::Class::File->new(AGENT_RUN_DIR, "gsp_agent_self_update_$ts.sh")->stringify;
-	my $repo_q = component_update_shell_quote($repo_url);
-	my $branch_q = component_update_shell_quote($branch);
-	my $source_q = component_update_shell_quote($source_path);
-	my $dest_q = component_update_shell_quote(AGENT_RUN_DIR);
-	my $state_q = component_update_shell_quote(AGENT_UPDATE_STATE_FILE);
-	my $log_q = component_update_shell_quote(AGENT_UPDATE_LOG_FILE);
-	my $screenrc_q = component_update_shell_quote(SCREENRC_FILE);
-	my $agent_ip_q = component_update_shell_quote(AGENT_IP eq '0.0.0.0' ? '127.0.0.1' : AGENT_IP);
-	my $agent_port_q = component_update_shell_quote(AGENT_PORT);
-	my $version_q = component_update_shell_quote(AGENT_VERSION);
-	my $timeout_q = component_update_shell_quote($timeout);
-	my $component_q = component_update_shell_quote($component);
-	my $script = <<"EOS";
-#!/usr/bin/env bash
-set -u
-LOG=$log_q
-STATE=$state_q
-DEST=$dest_q
-REPO=$repo_q
-BRANCH=$branch_q
-SOURCE_REL=$source_q
-SCREENRC=$screenrc_q
-AGENT_HOST=$agent_ip_q
-AGENT_PORT=$agent_port_q
-VERSION_BEFORE=$version_q
-TIMEOUT=$timeout_q
-COMPONENT=$component_q
-BACKUP_BASE="\$DEST/agent_self_update_backups"
-TMP="\${TMPDIR:-/tmp}/gsp_self_update_\$(date +%s)_\$\$"
-json_escape(){ printf '%s' "\$1" | sed 's/[\\\\"]/ /g'; }
-state(){ printf '{"status":"%s","message":"%s","update_id":"%s","log_path":"%s","state_path":"%s","rollback_performed":"%s","version_before":"%s","version_after":"%s"}\\n' "\$1" "\$(json_escape "\$2")" "$ts" "\$LOG" "\$STATE" "\${ROLLBACK:-0}" "\$VERSION_BEFORE" "\${VERSION_AFTER:-}" > "\$STATE"; }
-log(){ printf '[%s] %s\\n' "\$(date '+%Y-%m-%d %H:%M:%S')" "\$*" >> "\$LOG"; }
-health(){ perl -MIO::Socket::INET -e 'my \$s=IO::Socket::INET->new(PeerAddr=>shift,PeerPort=>shift,Proto=>"tcp",Timeout=>2); exit(\$s?0:1)' "\$AGENT_HOST" "\$AGENT_PORT" >/dev/null 2>&1; }
-stop_agent(){ if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^gsp_agent\\.service'; then systemctl stop gsp_agent.service >> "\$LOG" 2>&1 || true; else [ -f "\$DEST/gsp_agent_run.pid" ] && kill "\$(cat "\$DEST/gsp_agent_run.pid")" >/dev/null 2>&1 || true; [ -f "\$DEST/gsp_agent.pid" ] && kill "\$(cat "\$DEST/gsp_agent.pid")" >/dev/null 2>&1 || true; fi; }
-start_agent(){ if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^gsp_agent\\.service'; then systemctl start gsp_agent.service >> "\$LOG" 2>&1 || true; else cd "\$DEST" || return 1; if [ -f gsp_agent_run ]; then screen -d -m -t "gsp_agent" -c "\$SCREENRC" -S gsp_agent bash gsp_agent_run -pidfile gsp_agent_run.pid >> "\$LOG" 2>&1 || true; else screen -d -m -t "gsp_agent" -c "\$SCREENRC" -S gsp_agent perl gsp_agent.pl >> "\$LOG" 2>&1 || true; fi; fi; }
-verify_started(){ i=0; while [ "\$i" -lt "\$TIMEOUT" ]; do health && return 0; sleep 2; i=\$((i+2)); done; return 1; }
-ROLLBACK=0
-state in_progress "Preparing self-update"
-mkdir -p "\$TMP" "\$BACKUP_BASE" || { state failed "Cannot create staging or backup directory"; exit 1; }
-log "Self-update queued component=\$COMPONENT repo=\$REPO branch=\$BRANCH source=\$SOURCE_REL dest=\$DEST"
-git clone --depth 1 --branch "\$BRANCH" "\$REPO" "\$TMP/repo" >> "\$LOG" 2>&1 || { state failed "git clone failed"; exit 1; }
-SRC="\$TMP/repo/\$SOURCE_REL"
-[ -d "\$SRC" ] || { state failed "Source component folder missing"; exit 1; }
-[ -s "\$SRC/gsp_agent.pl" ] || { state failed "Staged gsp_agent.pl missing or empty"; exit 1; }
-if grep -Eqi '<html|not found|404' "\$SRC/gsp_agent.pl"; then state failed "Staged gsp_agent.pl looks like an HTTP error page"; exit 1; fi
-perl -c "\$SRC/gsp_agent.pl" >> "\$LOG" 2>&1 || { state failed "Staged gsp_agent.pl failed syntax validation"; exit 1; }
-ARCHIVE="\$BACKUP_BASE/\${COMPONENT}_\$(date +%Y%m%d_%H%M%S).tar.gz"
-tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./runtime_status' --exclude='./events' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./agent_self_update_backups' --exclude='./*.pid' -czf "\$ARCHIVE" -C "\$DEST" . >> "\$LOG" 2>&1 || { state failed "Backup failed"; exit 1; }
-state in_progress "Installing staged files"
-if command -v rsync >/dev/null 2>&1; then
-  rsync -a --exclude='Cfg/' --exclude='ServerFiles/' --exclude='Schedule/' --exclude='logs/' --exclude='screenlogs/' --exclude='steamcmd/' --exclude='startups/' --exclude='runtime_status/' --exclude='events/' --exclude='tmp/' --exclude='shared/' --exclude='component_backups/' --exclude='agent_self_update_backups/' --exclude='*.pid' "\$SRC"/ "\$DEST"/ >> "\$LOG" 2>&1 || { state failed "rsync copy failed"; exit 1; }
-else
-  (cd "\$SRC" && tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./runtime_status' --exclude='./events' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./agent_self_update_backups' --exclude='./*.pid' -cf - .) | (cd "\$DEST" && tar -xf -) >> "\$LOG" 2>&1 || { state failed "tar copy failed"; exit 1; }
-fi
-VERSION_AFTER="\$(grep -E \"version.*=>\" "\$DEST/Cfg/Config.pm" 2>/dev/null | head -1 | sed -E \"s/.*=>[[:space:]]*['\\\"]?([^,'\\\"]+).*/\\1/\")"
-state in_progress "Restarting updated agent"
-stop_agent
-sleep 2
-start_agent
-if verify_started; then state succeeded "Updated agent started and responded on its RPC port"; rm -rf "\$TMP"; exit 0; fi
-ROLLBACK=1
-state rolled_back "Updated agent did not respond; rolling back"
-stop_agent
-tar -xzf "\$ARCHIVE" -C "\$DEST" >> "\$LOG" 2>&1 || { state failed "Rollback restore failed"; exit 1; }
-start_agent
-if verify_started; then state rolled_back "Rollback restored previous agent and it responded"; else state failed "Rollback attempted but previous agent did not respond"; fi
-rm -rf "\$TMP"
-exit 0
-EOS
-	my $fh;
-	if(!open($fh, '>', $script_path))
+	my $update_id = "restart-$ts";
+	my $revision_file = Path::Class::File->new(AGENT_RUN_DIR, '.gsp_agent_source_revision')->stringify;
+	my $current_commit = agent_read_first_line($revision_file);
+	$current_commit =~ s/\s+$//;
+	my %request = (
+		update_id => $update_id,
+		status => 'pending',
+		component => $component,
+		repo_url => $repo_url,
+		branch => $branch,
+		source_path => $source_path,
+		timeout => $timeout,
+		requested_os => $cfg{requested_os} || '',
+		queued_at => scalar gmtime($ts),
+		state_path => AGENT_UPDATE_STATE_FILE . '',
+		request_path => AGENT_UPDATE_REQUEST_FILE . '',
+		log_path => AGENT_UPDATE_LOG_FILE . ''
+	);
+	my %state = (
+		success => 0,
+		status => 'pending',
+		message => 'Agent update request queued. It will be applied by the startup wrapper on the next normal restart when agent_auto_update is enabled.',
+		update_id => $update_id,
+		repo_url => $repo_url,
+		branch => $branch,
+		source_path => $source_path,
+		target_commit => '',
+		current_commit => $current_commit,
+		rollback_performed => 0,
+		version_before => AGENT_VERSION,
+		version_after => '',
+		state_path => AGENT_UPDATE_STATE_FILE . '',
+		request_path => AGENT_UPDATE_REQUEST_FILE . '',
+		log_path => AGENT_UPDATE_LOG_FILE . ''
+	);
+	my $request_tmp = AGENT_UPDATE_REQUEST_FILE . ".tmp.$$";
+	my $state_tmp = AGENT_UPDATE_STATE_FILE . ".tmp.$$";
+	my $request_fh;
+	if(!open($request_fh, '>', $request_tmp))
 	{
-		return component_update_response(success => 0, status => 'write_failed', message => "Cannot write updater script: $!");
+		return component_update_response(success => 0, status => 'write_failed', message => "Cannot write update request: $!");
 	}
-	print $fh $script;
-	close($fh);
-	chmod 0700, $script_path;
-	system('screen -d -m -t "agent_self_update" -c "' . SCREENRC_FILE . '" -S agent_self_update bash ' . component_update_shell_quote($script_path));
-	if($? != 0)
+	print $request_fh encode_json(\%request) . "\n";
+	close($request_fh);
+	my $state_fh;
+	if(!open($state_fh, '>', $state_tmp))
 	{
-		system('bash ' . component_update_shell_quote($script_path) . ' >/dev/null 2>&1 &');
+		unlink $request_tmp;
+		return component_update_response(success => 0, status => 'write_failed', message => "Cannot write update state: $!");
 	}
-	logger "Agent self-update queued for $component from $repo_url branch $branch.";
-	return component_update_response(success => 1, status => 'queued', message => 'Agent self-update queued. Poll update status for the final result.', update_id => $ts, log_path => AGENT_UPDATE_LOG_FILE, state_path => AGENT_UPDATE_STATE_FILE, rollback_performed => 0, version_before => AGENT_VERSION);
+	print $state_fh encode_json(\%state) . "\n";
+	close($state_fh);
+	if(!rename($request_tmp, AGENT_UPDATE_REQUEST_FILE) || !rename($state_tmp, AGENT_UPDATE_STATE_FILE))
+	{
+		unlink $request_tmp;
+		unlink $state_tmp;
+		return component_update_response(success => 0, status => 'write_failed', message => "Cannot publish update request/state: $!");
+	}
+	logger "Agent update request queued for $component from $repo_url branch $branch; it will apply on restart.";
+	return component_update_response(%state, success => 1, status => 'queued');
 }
 
 sub component_update_shell_quote

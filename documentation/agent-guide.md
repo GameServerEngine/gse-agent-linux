@@ -145,7 +145,7 @@ At startup the wrapper validates the config, refuses root execution, takes an ag
 
 ## Restart-Time Updates
 
-If `agent_auto_update=1`, `gsp_agent_run` checks the configured Git repo and branch on service or foreground restart. It resolves the remote branch head, skips revisions that already failed, clones to a temporary staging directory, validates `gsp_agent.pl` with `perl -c`, validates the wrapper with `bash -n`, creates one local backup archive, and copies source-owned files into the install directory while preserving config and runtime/customer data.
+If `agent_auto_update=1`, `gsp_agent_run` checks for a pending `gsp_agent_update_request.json` on service or foreground restart. The request is created by the `agent_self_update` RPC and contains the Git repo, branch, and source path selected by the Panel. The wrapper resolves the remote branch head, clones to a temporary staging directory, validates `gsp_agent.pl` with `perl -c`, validates the wrapper with `bash -n`, creates one local backup archive, and copies source-owned files into the install directory while preserving config and runtime/customer data.
 
 The wrapper records update status in:
 
@@ -153,6 +153,8 @@ The wrapper records update status in:
 - `/home/gameserver/GSP/gsp_agent_update.log`
 
 If the copied agent fails post-copy validation, the wrapper restores the backup immediately. If the updated agent exits during first startup, the wrapper attempts one rollback and relaunches with auto-update suppressed to avoid a failure loop.
+
+Terminal states are recorded as `completed`, `failed`, or `rolled_back`, and the pending request is removed so the same failed request is not retried on every restart. If `agent_auto_update=0`, the request remains `pending` until an admin enables restart-time updates or replaces the request.
 
 ## Logs
 
