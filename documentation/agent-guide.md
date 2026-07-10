@@ -134,14 +134,24 @@ sudo journalctl -u gsp_agent -f
 
 The generated unit runs as the selected agent user, sets `WorkingDirectory` to the selected install directory, and starts `gsp_agent_run`.
 
-`gsp_agent_run` is also the supported manual foreground wrapper:
+## Production And Debug Workflows
+
+Production hosts should run the agent through systemd:
+
+```bash
+sudo systemctl enable gsp_agent
+sudo systemctl restart gsp_agent
+sudo systemctl status gsp_agent
+```
+
+Use foreground mode only while debugging from an interactive shell:
 
 ```bash
 cd /home/gameserver/GSP
 ./gsp_agent_run --log-stdout
 ```
 
-At startup the wrapper validates the config, refuses root execution, takes an agent-local lock, checks that the configured agent port is available, and then starts `gsp_agent.pl`. If another valid wrapper instance or listener already owns the configured port, startup fails without killing unrelated processes.
+The same `gsp_agent_run` wrapper is used by systemd and by foreground debugging. At startup it validates configuration, refuses root execution, takes an agent-local lock, checks that the configured agent port is available, applies a queued restart-time update when `agent_auto_update=1`, and then starts `gsp_agent.pl`. If another valid wrapper instance or listener already owns the configured port, startup fails without killing unrelated processes.
 
 ## Restart-Time Updates
 
