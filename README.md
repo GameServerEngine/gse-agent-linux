@@ -6,7 +6,6 @@ Perl-based Linux execution agent for GameServer Panel. The agent receives signed
 
 - install directory: `/home/gameserver/GSP`
 - run script: `gsp_agent_run`
-- legacy run wrapper: `gsp_agent_run`
 - systemd service: `gsp_agent.service`
 - config directory: `/home/gameserver/GSP/Cfg/`
 - main log: `/home/gameserver/GSP/gsp_agent.log`
@@ -18,14 +17,21 @@ Legacy GSP script names are retained only where the Panel or older installs may 
 ## Guided Install
 
 ```bash
-chmod +x install_agent_prereqs.sh install.sh agent_conf.sh gsp_agent_run gsp_agent_run
+chmod +x install_agent_prereqs.sh install.sh agent_conf.sh gsp_agent_run
 sudo ./install_agent_prereqs.sh
 sudo ./install.sh
 ```
 
-The installer prompts for the install directory, Linux agent user, service name, agent key/shared secret, listen address, Panel URLs, remote server ID, FTP mode, and whether to install/start the systemd service.
+The installer currently targets Debian/Ubuntu package families. It prompts for install directory, Linux agent user, service name, Git repo URL/branch/source path, agent key/shared secret, listen address, Panel URLs, remote server ID, FTP mode, restart-time update behavior, and whether to install/start the systemd service.
 
 Use the same agent key/shared secret configured in the GSP Panel remote-server record.
+
+Repair or reconfigure an existing install with:
+
+```bash
+sudo ./install.sh --repair
+sudo ./install.sh --reconfigure
+```
 
 ## Service Commands
 
@@ -47,6 +53,8 @@ Generated files:
 - `Cfg/Config.pm`
 - `Cfg/Preferences.pm`
 - `Cfg/bash_prefs.cfg`
+
+`Cfg/bash_prefs.cfg` controls restart-time updates from the configured Git repo and branch. The service and foreground wrapper both use `gsp_agent_run`; the wrapper refuses duplicate startup when the configured agent port or a valid wrapper lock is already active.
 
 ## Documentation
 

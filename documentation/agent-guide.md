@@ -10,7 +10,8 @@ The Linux agent exposes the RPC endpoint that allows GameServer Panel to install
 
 - Ubuntu 20.04, 22.04, and 24.04 LTS
 - Debian 11 and 12
-- other modern Linux distributions with Perl, GNU Screen, rsync, sudo, and systemd or compatible service management
+
+The packaged prerequisite installer is intentionally Debian/Ubuntu first. Other distributions are not rejected by the agent runtime, but package installation must be handled manually until a verified installer path exists.
 
 ## Prerequisites
 
@@ -28,7 +29,7 @@ The script may show normal `needrestart` output about services, kernels, or VM g
 ## Guided Installation
 
 ```bash
-chmod +x install.sh agent_conf.sh gsp_agent_run gsp_agent_run
+chmod +x install.sh agent_conf.sh gsp_agent_run
 sudo ./install.sh
 ```
 
@@ -38,12 +39,26 @@ Default choices:
 - Linux user: `gameserver`
 - service name: `gsp_agent`
 - log file: `/home/gameserver/GSP/gsp_agent.log`
+- Git repository: `ssh://git@173.208.136.14/GSP/GSP-Agent-Linux.git`
+- Git branch: `unstable`
+- repository source path: `.`
 
 The installer runs as root from the start. If launched without root and `sudo` is available, it re-executes itself through `sudo` before creating users, copying files, or installing systemd units.
 
+The install and repair modes clone the configured repository and branch into a temporary directory, copy source-owned files into the install directory, and preserve runtime config and customer data. Clone failures prompt for retry instead of silently falling back to local files.
+
+Repair and reconfiguration modes:
+
+```bash
+sudo ./install.sh --repair
+sudo ./install.sh --reconfigure
+```
+
+`--repair` refreshes agent code from the configured repo and preserves existing config unless reconfiguration is requested. `--reconfigure` regenerates only `Cfg/Config.pm`, `Cfg/Preferences.pm`, and `Cfg/bash_prefs.cfg`.
+
 ## Configuration Prompts
 
-The installer calls `agent_conf.sh --guided`. The guided configuration asks for the agent key/shared secret, listen IP, listen port, Panel API URL, Panel event receiver URL, remote server ID, FTP management setting, FTP method, game-server autorestart setting, and restart-time agent auto-update setting.
+The installer calls `agent_conf.sh --guided`. The guided configuration asks for the agent key/shared secret, listen IP, listen port, Panel API URL, Panel event receiver URL, remote server ID, FTP management setting, FTP method, game-server autorestart setting, restart-time agent auto-update setting, update repository URL, update branch, and update source path.
 
 The agent key/shared secret must match the remote-server record in the GSP Panel.
 
@@ -79,6 +94,13 @@ Compatibility aliases are still written for older panel/agent paths:
 - `gsp_manages_ftp`
 - `gsp_autorestart_server`
 
+Important `bash_prefs.cfg` keys:
+
+- `agent_auto_update`
+- `agent_update_repo_url`
+- `agent_update_branch`
+- `agent_update_source_path`
+
 ## Folder Layout
 
 Default runtime folders:
@@ -112,6 +134,26 @@ sudo journalctl -u gsp_agent -f
 
 The generated unit runs as the selected agent user, sets `WorkingDirectory` to the selected install directory, and starts `gsp_agent_run`.
 
+`gsp_agent_run` is also the supported manual foreground wrapper:
+
+```bash
+cd /home/gameserver/GSP
+./gsp_agent_run --log-stdout
+```
+
+At startup the wrapper validates the config, refuses root execution, takes an agent-local lock, checks that the configured agent port is available, and then starts `gsp_agent.pl`. If another valid wrapper instance or listener already owns the configured port, startup fails without killing unrelated processes.
+
+## Restart-Time Updates
+
+If `agent_auto_update=1`, `gsp_agent_run` checks the configured Git repo and branch on service or foreground restart. It resolves the remote branch head, skips revisions that already failed, clones to a temporary staging directory, validates `gsp_agent.pl` with `perl -c`, validates the wrapper with `bash -n`, creates one local backup archive, and copies source-owned files into the install directory while preserving config and runtime/customer data.
+
+The wrapper records update status in:
+
+- `/home/gameserver/GSP/gsp_agent_update_state.json`
+- `/home/gameserver/GSP/gsp_agent_update.log`
+
+If the copied agent fails post-copy validation, the wrapper restores the backup immediately. If the updated agent exits during first startup, the wrapper attempts one rollback and relaunches with auto-update suppressed to avoid a failure loop.
+
 ## Logs
 
 - main agent log: `/home/gameserver/GSP/gsp_agent.log`
@@ -138,7 +180,10 @@ Use noninteractive flags when automating:
   --listen-port 12679 \
   --web-api-url https://panel.example.com/gsp_api.php \
   --agent-event-url https://panel.example.com/agent_event_receiver.php \
-  --remote-server-id 1
+  --remote-server-id 1 \
+  --repo-url ssh://git@173.208.136.14/GSP/GSP-Agent-Linux.git \
+  --repo-branch unstable \
+  --source-path .
 ```
 
 ## FTP Configuration
@@ -180,6 +225,13 @@ Service failed:
 - run `sudo systemctl status gsp_agent`
 - run `sudo journalctl -u gsp_agent -f`
 - run `perl -c /home/gameserver/GSP/gsp_agent.pl`
+- check `/home/gameserver/GSP/gsp_agent_update_state.json` if restart-time update is enabled
+
+Duplicate agent startup refused:
+
+- confirm no other agent instance is already using the configured `listen_port`
+- remove `gsp_agent_run.pid` only if the PID inside it no longer exists
+- do not kill unrelated processes that happen to contain `gsp_agent` in their command line
 
 Config missing or invalid:
 

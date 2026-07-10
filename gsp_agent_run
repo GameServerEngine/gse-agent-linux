@@ -4,57 +4,410 @@ set -euo pipefail
 
 AGENTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT="${AGENTDIR}/gsp_agent.pl"
-PID_FILE=""
+BASH_PREFS_CONF="${AGENTDIR}/Cfg/bash_prefs.cfg"
+LOCK_FILE="${AGENTDIR}/gsp_agent_run.lock"
+DEFAULT_PID_FILE="${AGENTDIR}/gsp_agent_run.pid"
+STATE_FILE="${AGENTDIR}/gsp_agent_update_state.json"
+UPDATE_LOG="${AGENTDIR}/gsp_agent_update.log"
+REVISION_FILE="${AGENTDIR}/.gsp_agent_source_revision"
+FAIL_MARKER="${AGENTDIR}/.gsp_agent_update_failed"
+BACKUP_ARCHIVE="${AGENTDIR}/agent_restart_update_backup.tar.gz"
 TIMEOUT=10
+PID_FILE=""
+UPDATE_APPLIED=0
+ROLLBACK_AVAILABLE=0
+UPDATE_VERSION_BEFORE=""
+UPDATE_APPLIED_AT=0
+UPDATE_FAILED_KEY=""
+agent_args=()
 
-while [ "$#" -gt 0 ]; do
-	case "$1" in
-		-pidfile)
-			PID_FILE="${2:-}"
-			shift 2
-			;;
-		*)
-			shift
-			;;
-	esac
-done
+log() {
+	printf '%s\n' "$*"
+}
 
-mkdir -p "${AGENTDIR}/logs" "${AGENTDIR}/screenlogs" "${AGENTDIR}/tmp" "${AGENTDIR}/_gsp_content/hooks" "${AGENTDIR}/_gsp_content/generated" "${AGENTDIR}/_gsp_content/runtime"
-touch "${AGENTDIR}/_gsp_content/runtime/server_content.pids" 2>/dev/null || true
+log_update() {
+	printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$UPDATE_LOG"
+}
 
-if [ "$(id -u)" -eq 0 ]; then
-	echo "ERROR: Do not run the GSP agent as root. Run it as the configured agent user." >&2
-	exit 1
-fi
+json_escape() {
+	printf '%s' "$1" | sed 's/[\\"]/ /g'
+}
 
-if [ ! -f "${AGENTDIR}/Cfg/Config.pm" ]; then
-	echo "ERROR: Missing ${AGENTDIR}/Cfg/Config.pm. Run ./agent_conf.sh --guided." >&2
-	exit 1
-fi
+write_state() {
+	local status="$1"
+	local message="$2"
+	local rollback="${3:-0}"
+	local revision="${4:-}"
+	local version_before
+	version_before="${UPDATE_VERSION_BEFORE:-$(cat "$REVISION_FILE" 2>/dev/null || true)}"
+	mkdir -p "$(dirname "$STATE_FILE")"
+	printf '{"status":"%s","message":"%s","update_id":"restart-%s","log_path":"%s","state_path":"%s","rollback_performed":"%s","version_before":"%s","version_after":"%s"}\n' \
+		"$status" "$(json_escape "$message")" "$(date +%s)" "$UPDATE_LOG" "$STATE_FILE" "$rollback" "$version_before" "$revision" > "$STATE_FILE"
+}
 
-if grep -Eq "CHANGE_ME_PANEL_AGENT_KEY|key[[:space:]]*=>[[:space:]]*''" "${AGENTDIR}/Cfg/Config.pm"; then
-	echo "ERROR: ${AGENTDIR}/Cfg/Config.pm still has a placeholder agent key." >&2
-	exit 1
-fi
+read_pref() {
+	local key="$1"
+	local default_value="$2"
+	local line value
+	[ -f "$BASH_PREFS_CONF" ] || {
+		printf '%s' "$default_value"
+		return 0
+	}
+	line="$(grep -E "^[[:space:]]*${key}=" "$BASH_PREFS_CONF" | tail -n 1 || true)"
+	[ -n "$line" ] || {
+		printf '%s' "$default_value"
+		return 0
+	}
+	value="${line#*=}"
+	if [[ "$value" =~ ^\".*\"$ || "$value" =~ ^\'.*\'$ ]]; then
+		value="${value:1:${#value}-2}"
+	fi
+	printf '%b' "$value"
+}
+
+config_value() {
+	local key="$1"
+	perl -I "$AGENTDIR" -MCfg::Config -e "print defined \$Cfg::Config{$key} ? \$Cfg::Config{$key} : ''" 2>/dev/null || true
+}
+
+validate_pid() {
+	local pid="$1"
+	[[ "$pid" =~ ^[0-9]+$ ]] || return 1
+	kill -0 "$pid" >/dev/null 2>&1 || return 1
+	return 0
+}
+
+ensure_port_available() {
+	local listen_ip="$1"
+	local listen_port="$2"
+	[ -n "$listen_port" ] || return 0
+	perl -MIO::Socket::INET -e '
+		my ($host, $port) = @ARGV;
+		$host = "0.0.0.0" if !defined($host) || $host eq "";
+		my $sock = IO::Socket::INET->new(LocalAddr => $host, LocalPort => $port, Proto => "tcp", Listen => 1, ReuseAddr => 1);
+		exit($sock ? 0 : 1);
+	' "$listen_ip" "$listen_port" >/dev/null 2>&1 || {
+		log "ERROR: configured agent port ${listen_ip}:${listen_port} is already in use. Refusing to start a duplicate agent."
+		exit 1
+	}
+}
+
+prepare_runtime() {
+	mkdir -p "${AGENTDIR}/logs" "${AGENTDIR}/screenlogs" "${AGENTDIR}/tmp" "${AGENTDIR}/runtime_status" "${AGENTDIR}/events" "${AGENTDIR}/_gsp_content/hooks" "${AGENTDIR}/_gsp_content/generated" "${AGENTDIR}/_gsp_content/runtime"
+	touch "${AGENTDIR}/_gsp_content/runtime/server_content.pids" 2>/dev/null || true
+}
+
+validate_config() {
+	if [ "$(id -u)" -eq 0 ]; then
+		log "ERROR: Do not run the GSP agent as root. Run it as the configured agent user." >&2
+		exit 1
+	fi
+	if [ ! -f "${AGENTDIR}/Cfg/Config.pm" ]; then
+		log "ERROR: Missing ${AGENTDIR}/Cfg/Config.pm. Run ./agent_conf.sh --guided." >&2
+		exit 1
+	fi
+	if grep -Eq "CHANGE_ME_PANEL_AGENT_KEY|key[[:space:]]*=>[[:space:]]*''" "${AGENTDIR}/Cfg/Config.pm"; then
+		log "ERROR: ${AGENTDIR}/Cfg/Config.pm still has a placeholder agent key." >&2
+		exit 1
+	fi
+}
+
+acquire_instance_lock() {
+	exec 9>"$LOCK_FILE"
+	if ! flock -n 9; then
+		if [ -f "$DEFAULT_PID_FILE" ]; then
+			local existing_pid
+			existing_pid="$(cat "$DEFAULT_PID_FILE" 2>/dev/null || true)"
+			if validate_pid "$existing_pid"; then
+				log "ERROR: another GSP agent wrapper is already running with PID ${existing_pid}."
+				exit 1
+			fi
+		fi
+		log "ERROR: another GSP agent wrapper holds ${LOCK_FILE}."
+		exit 1
+	fi
+
+	if [ -f "$DEFAULT_PID_FILE" ]; then
+		local stale_pid
+		stale_pid="$(cat "$DEFAULT_PID_FILE" 2>/dev/null || true)"
+		validate_pid "$stale_pid" || rm -f "$DEFAULT_PID_FILE"
+	fi
+}
+
+parse_args() {
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			-pidfile)
+				PID_FILE="${2:-}"
+				shift 2
+				;;
+			*)
+				agent_args+=("$1")
+				shift
+				;;
+		esac
+	done
+	[ -n "$PID_FILE" ] || PID_FILE="$DEFAULT_PID_FILE"
+}
+
+cleanup_pid() {
+	if [ -n "$PID_FILE" ] && [ -f "$PID_FILE" ] && [ "$(cat "$PID_FILE" 2>/dev/null || true)" = "$$" ]; then
+		rm -f "$PID_FILE"
+	fi
+}
+
+validate_staged_source() {
+	local src="$1"
+	[ -d "$src" ] || {
+		write_state failed "Source component folder missing"
+		return 1
+	}
+	[ -s "$src/gsp_agent.pl" ] || {
+		write_state failed "Staged gsp_agent.pl missing or empty"
+		return 1
+	}
+	if grep -Eqi '<html|not found|404' "$src/gsp_agent.pl"; then
+		write_state failed "Staged gsp_agent.pl looks like an HTTP error page"
+		return 1
+	fi
+	(cd "$src" && perl -c gsp_agent.pl >> "$UPDATE_LOG" 2>&1) || {
+		write_state failed "Staged gsp_agent.pl failed syntax validation"
+		return 1
+	}
+	[ ! -f "$src/gsp_agent_run" ] || bash -n "$src/gsp_agent_run" >> "$UPDATE_LOG" 2>&1 || {
+		write_state failed "Staged gsp_agent_run failed syntax validation"
+		return 1
+	}
+}
+
+backup_current_agent() {
+	local tmp_archive
+	tmp_archive="$(mktemp "${TMPDIR:-/tmp}/gsp-agent-restart-backup.XXXXXX.tar.gz")"
+	tar \
+		--exclude='./Cfg/Config.pm' \
+		--exclude='./Cfg/Preferences.pm' \
+		--exclude='./Cfg/bash_prefs.cfg' \
+		--exclude='./ServerFiles' \
+		--exclude='./Schedule' \
+		--exclude='./logs' \
+		--exclude='./screenlogs' \
+		--exclude='./steamcmd' \
+		--exclude='./startups' \
+		--exclude='./runtime_status' \
+		--exclude='./events' \
+		--exclude='./tmp' \
+		--exclude='./shared' \
+		--exclude='./component_backups' \
+		--exclude='./agent_self_update_backups' \
+		--exclude='./agent_restart_update_backup.tar.gz' \
+		--exclude='./*.pid' \
+		-czf "$tmp_archive" -C "$AGENTDIR" . >> "$UPDATE_LOG" 2>&1 && mv "$tmp_archive" "$BACKUP_ARCHIVE"
+}
+
+copy_staged_source() {
+	local src="$1"
+	if command -v rsync >/dev/null 2>&1; then
+		rsync -a \
+			--exclude='.git/' \
+			--exclude='Cfg/Config.pm' \
+			--exclude='Cfg/Preferences.pm' \
+			--exclude='Cfg/bash_prefs.cfg' \
+			--exclude='ServerFiles/' \
+			--exclude='Schedule/' \
+			--exclude='logs/' \
+			--exclude='screenlogs/' \
+			--exclude='steamcmd/' \
+			--exclude='startups/' \
+			--exclude='runtime_status/' \
+			--exclude='events/' \
+			--exclude='tmp/' \
+			--exclude='shared/' \
+			--exclude='component_backups/' \
+			--exclude='agent_self_update_backups/' \
+			--exclude='agent_restart_update_backup.tar.gz' \
+			--exclude='*.pid' \
+			"${src%/}/" "${AGENTDIR}/" >> "$UPDATE_LOG" 2>&1
+	else
+		(cd "$src" && tar \
+			--exclude='./.git' \
+			--exclude='./Cfg/Config.pm' \
+			--exclude='./Cfg/Preferences.pm' \
+			--exclude='./Cfg/bash_prefs.cfg' \
+			--exclude='./ServerFiles' \
+			--exclude='./Schedule' \
+			--exclude='./logs' \
+			--exclude='./screenlogs' \
+			--exclude='./steamcmd' \
+			--exclude='./startups' \
+			--exclude='./runtime_status' \
+			--exclude='./events' \
+			--exclude='./tmp' \
+			--exclude='./shared' \
+			--exclude='./component_backups' \
+			--exclude='./agent_self_update_backups' \
+			--exclude='./agent_restart_update_backup.tar.gz' \
+			--exclude='./*.pid' \
+			-cf - .) | (cd "$AGENTDIR" && tar -xf -) >> "$UPDATE_LOG" 2>&1
+	fi
+}
+
+restore_backup() {
+	[ -s "$BACKUP_ARCHIVE" ] || return 1
+	tar -xzf "$BACKUP_ARCHIVE" -C "$AGENTDIR" >> "$UPDATE_LOG" 2>&1
+}
+
+auto_update_on_restart() {
+	[ "${GSP_AGENT_SKIP_AUTO_UPDATE:-0}" = "1" ] && return 0
+	[ "$(read_pref agent_auto_update 0)" = "1" ] || return 0
+
+	local repo branch source_path head current failed_key tmp_dir src changed_wrapper
+	repo="$(read_pref agent_update_repo_url "")"
+	branch="$(read_pref agent_update_branch "unstable")"
+	source_path="$(read_pref agent_update_source_path ".")"
+	[ -n "$repo" ] || {
+		write_state failed "Restart-time update enabled but agent_update_repo_url is empty"
+		return 0
+	}
+	[[ "$repo" =~ ^(https?://|ssh://|git@|/) && "$repo" != *$'\n'* && "$repo" != *$'\r'* ]] || {
+		write_state failed "Invalid restart-time update repository URL"
+		return 0
+	}
+	[[ "$branch" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || {
+		write_state failed "Invalid restart-time update branch"
+		return 0
+	}
+	[[ "$source_path" =~ ^[A-Za-z0-9._/-]+$ && "$source_path" != *".."* ]] || {
+		write_state failed "Invalid restart-time update source path"
+		return 0
+	}
+
+	command -v git >/dev/null 2>&1 || {
+		write_state failed "git is required for restart-time update"
+		return 0
+	}
+
+	head="$(git ls-remote --heads "$repo" "refs/heads/$branch" 2>>"$UPDATE_LOG" | awk '{print $1}' | head -n 1)"
+	[ -n "$head" ] || {
+		write_state failed "Could not resolve restart-time update branch"
+		return 0
+	}
+	current="$(cat "$REVISION_FILE" 2>/dev/null || true)"
+	UPDATE_VERSION_BEFORE="$current"
+	[ "$current" = "$head" ] && return 0
+
+	failed_key="${repo}|${branch}|${head}"
+	UPDATE_FAILED_KEY="$failed_key"
+	if [ -f "$FAIL_MARKER" ] && grep -qxF "$failed_key" "$FAIL_MARKER"; then
+		write_state failed "Skipping restart-time update after previous failure for this revision" 0 "$current"
+		return 0
+	fi
+
+	tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/gsp-agent-restart-update.XXXXXX")"
+	write_state in_progress "Preparing restart-time update" 0 "$head"
+	log_update "Restart-time update repo=${repo} branch=${branch} revision=${head}"
+
+	if ! git clone --depth 1 --branch "$branch" "$repo" "$tmp_dir/repo" >> "$UPDATE_LOG" 2>&1; then
+		printf '%s\n' "$failed_key" > "$FAIL_MARKER"
+		write_state failed "git clone failed" 0 "$current"
+		rm -rf "$tmp_dir"
+		return 0
+	fi
+
+	src="$tmp_dir/repo/${source_path#./}"
+	if ! validate_staged_source "$src"; then
+		printf '%s\n' "$failed_key" > "$FAIL_MARKER"
+		rm -rf "$tmp_dir"
+		return 0
+	fi
+
+	if ! backup_current_agent; then
+		printf '%s\n' "$failed_key" > "$FAIL_MARKER"
+		write_state failed "Backup failed" 0 "$current"
+		rm -rf "$tmp_dir"
+		return 0
+	fi
+	ROLLBACK_AVAILABLE=1
+
+	changed_wrapper=0
+	if [ -f "$src/gsp_agent_run" ] && ! cmp -s "$src/gsp_agent_run" "$AGENTDIR/gsp_agent_run"; then
+		changed_wrapper=1
+	fi
+
+	write_state in_progress "Installing staged files" 0 "$head"
+	if ! copy_staged_source "$src"; then
+		printf '%s\n' "$failed_key" > "$FAIL_MARKER"
+		write_state failed "Copy failed" 0 "$current"
+		restore_backup || true
+		rm -rf "$tmp_dir"
+		return 0
+	fi
+	chmod +x "$AGENTDIR/gsp_agent_run" "$AGENTDIR/agent_conf.sh" "$AGENT" 2>/dev/null || true
+
+	if ! (cd "$AGENTDIR" && perl -c gsp_agent.pl >> "$UPDATE_LOG" 2>&1); then
+		printf '%s\n' "$failed_key" > "$FAIL_MARKER"
+		write_state rolled_back "Updated agent failed post-copy syntax validation" 1 "$current"
+		restore_backup || write_state failed "Rollback restore failed" 1 "$current"
+		rm -rf "$tmp_dir"
+		return 0
+	fi
+
+	printf '%s\n' "$head" > "$REVISION_FILE"
+	rm -f "$FAIL_MARKER"
+	UPDATE_APPLIED=1
+	UPDATE_APPLIED_AT="$(date +%s)"
+	write_state succeeded "Restart-time update staged successfully" 0 "$head"
+	rm -rf "$tmp_dir"
+
+	if [ "$changed_wrapper" -eq 1 ]; then
+		log "$(date): GSP agent wrapper changed during update; relaunching wrapper."
+		GSP_AGENT_SKIP_AUTO_UPDATE=1 exec "$AGENTDIR/gsp_agent_run" -pidfile "$PID_FILE" "${agent_args[@]}"
+	fi
+}
+
+rollback_after_start_failure() {
+	[ "$UPDATE_APPLIED" -eq 1 ] || return 1
+	[ "$ROLLBACK_AVAILABLE" -eq 1 ] || return 1
+	if [ "$UPDATE_APPLIED_AT" -gt 0 ] && [ $(( $(date +%s) - UPDATE_APPLIED_AT )) -gt 120 ]; then
+		return 1
+	fi
+	log_update "Updated agent exited before a clean start; attempting rollback."
+	[ -n "$UPDATE_FAILED_KEY" ] && printf '%s\n' "$UPDATE_FAILED_KEY" > "$FAIL_MARKER"
+	if restore_backup; then
+		write_state rolled_back "Updated agent exited during startup; restored previous files" 1 "$(cat "$REVISION_FILE" 2>/dev/null || true)"
+		GSP_AGENT_SKIP_AUTO_UPDATE=1 exec "$AGENTDIR/gsp_agent_run" -pidfile "$PID_FILE" "${agent_args[@]}"
+	fi
+	write_state failed "Updated agent exited during startup and rollback restore failed" 1 "$(cat "$REVISION_FILE" 2>/dev/null || true)"
+	return 1
+}
+
+parse_args "$@"
+prepare_runtime
+validate_config
+acquire_instance_lock
+
+LISTEN_IP="$(config_value listen_ip)"
+LISTEN_PORT="$(config_value listen_port)"
+ensure_port_available "$LISTEN_IP" "$LISTEN_PORT"
 
 if [ ! -x "$AGENT" ]; then
 	chmod ug+x "$AGENT" 2>/dev/null || true
 fi
 
-if [ -n "$PID_FILE" ]; then
-	echo "$$" > "$PID_FILE"
-fi
+echo "$$" > "$PID_FILE"
+trap cleanup_pid EXIT INT TERM
 
 cd "$AGENTDIR"
+auto_update_on_restart
 
 while true; do
-	perl "$AGENT" "$@" || rc=$?
+	perl "$AGENT" "${agent_args[@]}" || rc=$?
 	rc="${rc:-0}"
 	if [ "$rc" -eq 0 ]; then
-		echo "$(date): GSP Agent stopped cleanly"
+		log "$(date): GSP Agent stopped cleanly"
 		exit 0
 	fi
-	echo "$(date): GSP Agent exited with status ${rc}; restarting in ${TIMEOUT}s" >&2
+	rollback_after_start_failure || true
+	log "$(date): GSP Agent exited with status ${rc}; restarting in ${TIMEOUT}s" >&2
 	sleep "$TIMEOUT"
 	unset rc
 done

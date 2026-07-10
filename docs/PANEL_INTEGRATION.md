@@ -12,6 +12,7 @@ New Linux installs default to:
 - run script: `gsp_agent_run`
 - service: `gsp_agent.service`
 - log file: `/home/gameserver/GSP/gsp_agent.log`
+- update source: configured Git repository, branch, and source path in `Cfg/bash_prefs.cfg`
 
 Legacy names such as `gsp_agent_run` remain wrappers or protocol compatibility details only.
 
@@ -53,6 +54,8 @@ The Linux agent exposes these structured RPCs for the Admin -> Servers per-agent
 ## Self-Update And Rollback
 
 The self-updater stages the requested component from an allowlisted repo/branch/source path, validates `gsp_agent.pl` with `perl -c`, creates a timestamped backup, copies staged files into the active agent directory, and restarts the agent through `gsp_agent.service` when present or the local run wrapper otherwise.
+
+Restart-time updates are local wrapper behavior, not Panel business logic. When `agent_auto_update=1`, `gsp_agent_run` uses `agent_update_repo_url`, `agent_update_branch`, and `agent_update_source_path` from `Cfg/bash_prefs.cfg`, validates staged code, creates one local restart-update backup, writes `gsp_agent_update_state.json`, and suppresses repeated attempts for a revision that already failed.
 
 The updater preserves host/customer data and local config:
 

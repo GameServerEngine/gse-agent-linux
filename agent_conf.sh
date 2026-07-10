@@ -8,6 +8,9 @@ DEFAULT_AGENT_VERSION="v1.4"
 DEFAULT_FTP_METHOD="PureFTPd"
 DEFAULT_FTP_PORT="21"
 DEFAULT_FTP_PASV_RANGE=""
+DEFAULT_REPO_URL="ssh://git@173.208.136.14/GSP/GSP-Agent-Linux.git"
+DEFAULT_REPO_BRANCH="unstable"
+DEFAULT_SOURCE_PATH="."
 
 usage() {
 	cat <<EOF
@@ -31,6 +34,9 @@ Options:
   --ftp-method NAME           FTP backend. Default: ${DEFAULT_FTP_METHOD}
   --auto-restart 0|1          Restart crashed game servers. Default: 1
   --auto-update 0|1           Restart-time agent auto update. Default: 0
+  --repo-url URL              Git repository used by restart-time update.
+  --repo-branch BRANCH        Git branch used by restart-time update.
+  --source-path PATH          Agent source path inside the update repository.
   --guided                    Prompt for missing values.
   --help                      Show this help.
 
@@ -68,6 +74,9 @@ protocol_shutdown_waittime="10"
 ftp_port="$DEFAULT_FTP_PORT"
 ftp_ip="$DEFAULT_IP"
 ftp_pasv_range="$DEFAULT_FTP_PASV_RANGE"
+repo_url="$DEFAULT_REPO_URL"
+repo_branch="$DEFAULT_REPO_BRANCH"
+source_path="$DEFAULT_SOURCE_PATH"
 
 ask() {
 	local prompt="$1"
@@ -94,6 +103,19 @@ require_01() {
 	}
 }
 
+perl_quote() {
+	local value="${1-}"
+	value="${value//\\/\\\\}"
+	value="${value//\'/\\\'}"
+	printf '%s' "$value"
+}
+
+shell_assignment() {
+	local name="$1"
+	local value="$2"
+	printf '%s=%q\n' "$name" "$value"
+}
+
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--install-dir) install_dir="${2:-}"; shift 2 ;;
@@ -109,6 +131,9 @@ while [ "$#" -gt 0 ]; do
 		--ftp-method) ftp_method="${2:-}"; shift 2 ;;
 		--auto-restart) auto_restart="${2:-}"; shift 2 ;;
 		--auto-update) auto_update="${2:-}"; shift 2 ;;
+		--repo-url) repo_url="${2:-}"; shift 2 ;;
+		--repo-branch) repo_branch="${2:-}"; shift 2 ;;
+		--source-path) source_path="${2:-}"; shift 2 ;;
 		--guided) guided=1; shift ;;
 		-s) sudo_password="${2:-}"; shift 2 ;;
 		-u) agent_user="${2:-}"; shift 2 ;;
@@ -137,6 +162,9 @@ if [ "$guided" -eq 1 ]; then
 	ftp_method="$(ask "FTP method" "$ftp_method")"
 	auto_restart="$(ask "Restart crashed game servers? 1=yes, 0=no" "$auto_restart")"
 	auto_update="$(ask "Restart-time agent auto-update? 1=yes, 0=no" "$auto_update")"
+	repo_url="$(ask "Restart-time update repository URL" "$repo_url")"
+	repo_branch="$(ask "Restart-time update branch" "$repo_branch")"
+	source_path="$(ask "Agent source path inside update repository" "$source_path")"
 	if [ -z "$sudo_password" ]; then
 		sudo_password="$(ask_secret "Optional sudo password for legacy sudo_exec flows, leave blank if not used")"
 	fi
@@ -150,22 +178,44 @@ fi
 require_01 "ftp-managed" "$ftp_managed"
 require_01 "auto-restart" "$auto_restart"
 require_01 "auto-update" "$auto_update"
+[[ "$repo_url" =~ ^(https?://|ssh://|git@|/) && "$repo_url" != *$'\n'* && "$repo_url" != *$'\r'* ]] || {
+	echo "ERROR: invalid update repository URL." >&2
+	exit 1
+}
+[[ "$repo_branch" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || {
+	echo "ERROR: invalid update branch." >&2
+	exit 1
+}
+[[ "$source_path" =~ ^[A-Za-z0-9._/-]+$ && "$source_path" != *".."* ]] || {
+	echo "ERROR: invalid update source path." >&2
+	exit 1
+}
 
-mkdir -p "$cfg_dir" "${install_dir}/logs" "${install_dir}/tmp" "${install_dir}/screenlogs" "${install_dir}/_gsp_content/hooks" "${install_dir}/_gsp_content/generated" "${install_dir}/_gsp_content/runtime"
+mkdir -p "$cfg_dir" "${install_dir}/logs" "${install_dir}/tmp" "${install_dir}/screenlogs" "${install_dir}/runtime_status" "${install_dir}/events" "${install_dir}/_gsp_content/hooks" "${install_dir}/_gsp_content/generated" "${install_dir}/_gsp_content/runtime"
+
+key_q="$(perl_quote "$key")"
+listen_ip_q="$(perl_quote "$listen_ip")"
+listen_port_q="$(perl_quote "$listen_port")"
+sudo_password_q="$(perl_quote "$sudo_password")"
+web_api_url_q="$(perl_quote "$web_api_url")"
+agent_event_url_q="$(perl_quote "$agent_event_url")"
+remote_server_id_q="$(perl_quote "$remote_server_id")"
+install_dir_q="$(perl_quote "$install_dir")"
+ftp_method_q="$(perl_quote "$ftp_method")"
 
 cat > "$cfgfile" <<EOF
 %Cfg::Config = (
-	logfile => '${install_dir}/gsp_agent.log',
-	listen_port => '${listen_port}',
-	listen_ip => '${listen_ip}',
+	logfile => '${install_dir_q}/gsp_agent.log',
+	listen_port => '${listen_port_q}',
+	listen_ip => '${listen_ip_q}',
 	version => '${DEFAULT_AGENT_VERSION}',
-	key => '${key}',
+	key => '${key_q}',
 	steam_license => '${steam_license}',
-	sudo_password => '${sudo_password}',
+	sudo_password => '${sudo_password_q}',
 	web_admin_api_key => '',
-	web_api_url => '${web_api_url}',
-	agent_event_url => '${agent_event_url}',
-	remote_server_id => '${remote_server_id}',
+	web_api_url => '${web_api_url_q}',
+	agent_event_url => '${agent_event_url_q}',
+	remote_server_id => '${remote_server_id_q}',
 	steam_dl_limit => '0',
 	stats_db_host => '',
 	stats_db_user => '',
@@ -181,7 +231,7 @@ cat > "$prefsfile" <<EOF
 	screen_log_local => '${screen_log_local}',
 	delete_logs_after => '${delete_logs_after}',
 	gsp_manages_ftp => '${ftp_managed}',
-	ftp_method => '${ftp_method}',
+	ftp_method => '${ftp_method_q}',
 	gsp_autorestart_server => '${auto_restart}',
 	protocol_shutdown_waittime => '${protocol_shutdown_waittime}',
 	linux_user_per_game_server => '${linux_user_per_game_server}',
@@ -191,16 +241,16 @@ cat > "$prefsfile" <<EOF
 );
 EOF
 
-cat > "$bashprefsfile" <<EOF
-agent_auto_update=${auto_update}
-agent_update_repo_url=https://git.runlevelsystems.com/GSP/GSP-Agent-Linux.git
-agent_update_branch=unstable
-agent_update_raw_url=https://git.runlevelsystems.com/GSP/GSP-Agent-Linux/raw/branch/unstable/gsp_agent.pl
-run_pureftpd=${ftp_managed}
-ftp_port=${ftp_port}
-ftp_ip=${ftp_ip}
-ftp_pasv_range=${ftp_pasv_range}
-EOF
+{
+	shell_assignment agent_auto_update "$auto_update"
+	shell_assignment agent_update_repo_url "$repo_url"
+	shell_assignment agent_update_branch "$repo_branch"
+	shell_assignment agent_update_source_path "$source_path"
+	shell_assignment run_pureftpd "$ftp_managed"
+	shell_assignment ftp_port "$ftp_port"
+	shell_assignment ftp_ip "$ftp_ip"
+	shell_assignment ftp_pasv_range "$ftp_pasv_range"
+} > "$bashprefsfile"
 
 chmod 600 "$cfgfile"
 chmod 644 "$prefsfile" "$bashprefsfile"
