@@ -41,6 +41,8 @@ The Linux agent prepares this runtime layout for generated content hooks:
 
 During stop/restart, hook watchdog PIDs are cleaned up before hook application PIDs. Main game server watchdog PIDs should not be written to `server_content.pids`.
 
+Legacy `_alsoRun.pid` files remain compatibility input only. When present at the game home root or one level below it, the Linux agent imports those PIDs into the server-content cleanup path so stop, restart, and force-stop clean legacy helper processes consistently with the Windows agent.
+
 ## Agent Operations RPCs
 
 The Linux agent exposes these structured RPCs for the Admin -> Servers per-agent interface:

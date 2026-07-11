@@ -117,6 +117,8 @@ Default runtime folders:
 
 The `_gsp_content/runtime/server_content.pids` file is reserved for generated server-content hook processes. During stop/restart cleanup, hook watchdog PIDs are stopped before hook application PIDs. The main game server watchdog PID should not be stored in this file.
 
+Legacy `_alsoRun.pid` files are treated as compatibility input. Stop, restart, and force-stop import matching helper PIDs into the server-content cleanup path before escalating to main server PID and port cleanup.
+
 ## systemd Service
 
 New installs use:

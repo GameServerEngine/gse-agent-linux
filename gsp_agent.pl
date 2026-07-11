@@ -230,11 +230,50 @@ sub prepare_server_content_runtime_without_decrypt
 	}
 }
 
+sub append_server_content_pid_without_decrypt
+{
+	my ($pid_file, $pid, $role, $label) = @_;
+	return unless(defined($pid_file) && $pid_file ne "" && defined($pid) && $pid =~ /^\d+$/);
+	$role = "app" unless(defined($role) && $role =~ /^(watchdog|app|main_server)$/i);
+	$label = "" unless(defined($label));
+	if(open(my $fh, '>>', $pid_file))
+	{
+		print $fh "$role $pid $label\n";
+		close($fh);
+	}
+}
+
+sub import_legacy_also_run_pids_without_decrypt
+{
+	my ($home_path) = @_;
+	return if(!defined($home_path) || $home_path eq "");
+	prepare_server_content_runtime_without_decrypt($home_path);
+	my $pid_file = "$home_path/_gsp_content/runtime/server_content.pids";
+	my %seen;
+	foreach my $legacy_pid_file ("$home_path/_alsoRun.pid", bsd_glob("$home_path/*/_alsoRun.pid"))
+	{
+		next if(!defined($legacy_pid_file) || $legacy_pid_file eq "" || !-f $legacy_pid_file);
+		if(open(my $in, '<', $legacy_pid_file))
+		{
+			while(my $line = <$in>)
+			{
+				chomp($line);
+				my ($pid) = $line =~ /(\d{2,})/;
+				next unless(defined($pid) && !$seen{$pid});
+				$seen{$pid} = 1;
+				append_server_content_pid_without_decrypt($pid_file, $pid, "app", "legacy_alsoRun");
+			}
+			close($in);
+		}
+	}
+}
+
 sub cleanup_server_content_pid_group_without_decrypt
 {
 	my ($pid_file, $wanted_role, $as_user) = @_;
 	return if(!-f $pid_file);
 	my @remaining;
+	my %killed;
 	my $in;
 	if(!open($in, '<', $pid_file))
 	{
@@ -252,6 +291,8 @@ sub cleanup_server_content_pid_group_without_decrypt
 		$role = "main_server" if($line =~ /main[_-]?server/i);
 		if(defined($pid) && $role eq $wanted_role)
 		{
+			next if($killed{$pid});
+			$killed{$pid} = 1;
 			logger "Stopping server-content $role PID $pid from $pid_file.";
 			sudo_exec_without_decrypt("kill -TERM $pid >/dev/null 2>&1 || true", $as_user);
 			sleep 1 if($wanted_role eq "watchdog");
@@ -275,7 +316,7 @@ sub cleanup_server_content_hooks_without_decrypt
 {
 	my ($home_path, $as_user) = @_;
 	return if(!defined($home_path) || $home_path eq "");
-	prepare_server_content_runtime_without_decrypt($home_path);
+	import_legacy_also_run_pids_without_decrypt($home_path);
 	my $pid_file = "$home_path/_gsp_content/runtime/server_content.pids";
 	cleanup_server_content_pid_group_without_decrypt($pid_file, "watchdog", $as_user);
 	cleanup_server_content_pid_group_without_decrypt($pid_file, "app", $as_user);
