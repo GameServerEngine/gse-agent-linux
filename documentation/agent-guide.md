@@ -207,6 +207,8 @@ Default FTP mode is PureFTPd-compatible account management:
 - `gsp_manages_ftp => '1'`
 - `ftp_method => 'PureFTPd'`
 
+The Windows agent uses the same Pure-FTPd virtual-user command model through Cygwin, so Panel `ftp_mgr` calls should behave consistently across Linux and Windows agents.
+
 Set `gsp_manages_ftp` to `0` if FTP accounts are managed outside the agent.
 
 ## Troubleshooting
