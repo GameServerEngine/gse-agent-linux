@@ -5,7 +5,7 @@ set -euo pipefail
 DEFAULT_INSTALL_DIR="/home/gameserver/GSP"
 DEFAULT_AGENT_USER="gameserver"
 DEFAULT_SERVICE_NAME="gsp_agent"
-DEFAULT_REPO_URL="ssh://git@173.208.136.14/GSP/GSP-Agent-Linux.git"
+DEFAULT_REPO_URL="https://git.runlevelsystems.com/GSE/Agent-Linux"
 DEFAULT_REPO_BRANCH="unstable"
 DEFAULT_SOURCE_PATH="."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,7 +13,7 @@ ORIG_ARGS=("$@")
 
 usage() {
 	cat <<EOF
-GSP Linux Agent installer
+GSE Linux Agent installer
 
 Usage: sudo bash install.sh [options]
 
@@ -274,9 +274,9 @@ esac
 
 require_root
 
-log "GSP Linux Agent ${MODE}"
+log "GSE Linux Agent ${MODE}"
 log
-log "This installer configures the Linux execution agent for GameServer Panel."
+log "This installer configures the Linux execution agent for Gameserver Engine."
 log "Use the same key/password configured for this remote server in the Panel."
 log
 
@@ -295,8 +295,8 @@ fi
 INSTALL_DIR="${INSTALL_DIR:-$(ask "Install directory" "$DEFAULT_INSTALL_DIR")}"
 AGENT_USER="${AGENT_USER:-$(ask "Agent Linux user" "$DEFAULT_AGENT_USER")}"
 SERVICE_NAME="${SERVICE_NAME:-$(ask "systemd service name" "$DEFAULT_SERVICE_NAME")}"
-REPO_URL="${REPO_URL:-$(ask "GSP Linux agent Git repository URL" "$DEFAULT_REPO_URL")}"
-REPO_BRANCH="${REPO_BRANCH:-$(ask "GSP Linux agent Git branch" "$DEFAULT_REPO_BRANCH")}"
+REPO_URL="${REPO_URL:-$(ask "GSE Linux agent Git repository URL" "$DEFAULT_REPO_URL")}"
+REPO_BRANCH="${REPO_BRANCH:-$(ask "GSE Linux agent Git branch" "$DEFAULT_REPO_BRANCH")}"
 SOURCE_PATH="${SOURCE_PATH:-$(ask "Agent source path inside repository" "$DEFAULT_SOURCE_PATH")}"
 
 INSTALL_DIR="${INSTALL_DIR%/}"
@@ -359,7 +359,7 @@ fi
 
 cat <<EOF
 
-GSP Linux Agent ${MODE} complete.
+GSE Linux Agent ${MODE} complete.
 
 Config files:
   ${INSTALL_DIR}/Cfg/Config.pm
@@ -377,7 +377,7 @@ Useful commands:
   cd ${INSTALL_DIR} && ./gsp_agent_run --log-stdout
 
 Panel configuration still required:
-  1. Add or edit the remote server in the GSP Panel.
+  1. Add or edit the remote server in the GSE Panel.
   2. Use listen IP/port from Config.pm.
   3. Use the same agent key/shared secret from Config.pm.
   4. Open the configured agent port in the firewall.

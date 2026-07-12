@@ -1,7 +1,7 @@
-# GSP Linux Agent systemd service
+# GSE Linux Agent systemd service
 
 [Unit]
-Description=GameServer Panel Linux Agent
+Description=Gameserver Engine Linux Agent
 After=network-online.target
 Wants=network-online.target
 

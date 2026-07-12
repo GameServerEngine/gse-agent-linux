@@ -25,7 +25,7 @@ if (isset($_GET['password'])) {
 
 if (!isset($ftp_username) || !isset($ftp_pass)) {
     $errorCount++;
-    $errors[] = "No FTP accounts could be modified! Updated username and password were not sent by the GSP upload functions.";
+    $errors[] = "No FTP accounts could be modified! Updated username and password were not sent by the GSE upload functions.";
 } else {
     
     if ($errorCount == 0) {

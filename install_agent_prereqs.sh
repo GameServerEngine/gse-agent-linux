@@ -14,7 +14,7 @@ if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg >/dev/null 2>&1; th
 	exit 1
 fi
 
-echo "Installing GSP Linux Agent prerequisites for Debian/Ubuntu."
+echo "Installing GSE Linux Agent prerequisites for Debian/Ubuntu."
 echo "Package manager output from needrestart about services, VM guests, or kernel state is normal OS maintenance output."
 
 apt-get update

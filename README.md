@@ -1,6 +1,6 @@
-# GSP Linux Agent
+# GSE Linux Agent
 
-Perl-based Linux execution agent for GameServer Panel. The agent receives signed RPC calls from the GSP Panel and launches customer game servers on Linux hosts.
+Perl-based Linux execution agent for Gameserver Engine. The agent receives signed RPC calls from the GSE Panel and launches customer game servers on Linux hosts.
 
 ## Default Layout
 
@@ -12,7 +12,7 @@ Perl-based Linux execution agent for GameServer Panel. The agent receives signed
 - screen logs: `/home/gameserver/GSP/screenlogs/`
 - server-content runtime: `/home/gameserver/GSP/_gsp_content/`
 
-Legacy GSP script names are retained only where the Panel or older installs may still expect them.
+Legacy `GSP` script names, default paths, config keys, RPC headers, screen-session prefixes, and Workshop markers are retained only where the Panel or older installs may still expect them.
 
 ## Guided Install
 
@@ -24,7 +24,7 @@ sudo ./install.sh
 
 The installer currently targets Debian/Ubuntu package families. It prompts for install directory, Linux agent user, service name, Git repo URL/branch/source path, agent key/shared secret, listen address, Panel URLs, remote server ID, FTP mode, restart-time update behavior, and whether to install/start the systemd service.
 
-Use the same agent key/shared secret configured in the GSP Panel remote-server record.
+Use the same agent key/shared secret configured in the GSE Panel remote-server record.
 
 Repair or reconfigure an existing install with:
 
@@ -64,5 +64,5 @@ Generated files:
 
 ## Related Projects
 
-- GSP Panel: control plane that sends agent commands
-- GSP-Agent-Windows: Windows/Cygwin execution engine
+- GSE Panel: control plane that sends agent commands
+- GSE Agent-Windows: Windows/Cygwin execution engine

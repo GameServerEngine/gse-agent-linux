@@ -8,13 +8,13 @@ DEFAULT_AGENT_VERSION="v1.4"
 DEFAULT_FTP_METHOD="PureFTPd"
 DEFAULT_FTP_PORT="21"
 DEFAULT_FTP_PASV_RANGE=""
-DEFAULT_REPO_URL="ssh://git@173.208.136.14/GSP/GSP-Agent-Linux.git"
+DEFAULT_REPO_URL="https://git.runlevelsystems.com/GSE/Agent-Linux"
 DEFAULT_REPO_BRANCH="unstable"
 DEFAULT_SOURCE_PATH="."
 
 usage() {
 	cat <<EOF
-GSP Linux Agent configuration helper
+GSE Linux Agent configuration helper
 
 Usage:
   ./agent_conf.sh --guided
@@ -23,14 +23,14 @@ Usage:
 Options:
   --install-dir PATH          Agent install directory. Default: directory containing this script.
   --agent-user USER           Owner for generated config files.
-  --key VALUE                 Agent key/shared secret from the GSP Panel remote-server record.
+  --key VALUE                 Agent key/shared secret from the GSE Panel remote-server record.
   --listen-ip IP              Agent bind IP. Default: ${DEFAULT_IP}
   --listen-port PORT          Agent bind port. Default: ${DEFAULT_PORT}
   --sudo-password VALUE       Optional sudo password for legacy sudo_exec flows.
   --web-api-url URL           Panel gsp_api.php URL.
   --agent-event-url URL       Panel agent_event_receiver.php URL.
   --remote-server-id ID       Panel remote server ID.
-  --ftp-managed 0|1           Whether GSP should manage FTP accounts. Default: 1
+  --ftp-managed 0|1           Whether GSE should manage FTP accounts. Default: 1
   --ftp-method NAME           FTP backend. Default: ${DEFAULT_FTP_METHOD}
   --auto-restart 0|1          Restart crashed game servers. Default: 1
   --auto-update 0|1           Restart-time agent auto update. Default: 0
@@ -149,7 +149,7 @@ prefsfile="${cfg_dir}/Preferences.pm"
 bashprefsfile="${cfg_dir}/bash_prefs.cfg"
 
 if [ "$guided" -eq 1 ]; then
-	echo "GSP Linux Agent configuration"
+	echo "GSE Linux Agent configuration"
 	echo "Use values from Panel -> Administration -> Game Servers for this remote server."
 	echo
 	key="${key:-$(ask_secret "Agent key/shared secret")}"

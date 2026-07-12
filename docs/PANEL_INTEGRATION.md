@@ -1,4 +1,4 @@
-# GSP Linux Agent Panel Integration
+# GSE Linux Agent Panel Integration
 
 Workspace reference: [`GSP-WORKSPACE.md`](../../GSP-WORKSPACE.md)
 
@@ -15,6 +15,8 @@ New Linux installs default to:
 - update source: configured Git repository, branch, and source path in `Cfg/bash_prefs.cfg`
 
 Legacy names such as `gsp_agent_run` remain wrappers or protocol compatibility details only.
+
+The repository identity is `GSE/Agent-Linux`, but installed-agent compatibility names remain `gsp_agent`, `/home/gameserver/GSP`, `gsp_` config keys, `X-GSP-*` headers, `GSP_*` screen names, and `GSP_WORKSHOP_*` job markers until the Panel and field installs are migrated together.
 
 ## Legacy Workshop RPC
 

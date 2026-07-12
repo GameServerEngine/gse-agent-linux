@@ -27,7 +27,7 @@ if (file_exists("config.php")) {
 
 include_once 'db_functions.php';
 
-// Did we properly receive the variables from the GSP agent?
+// Did we properly receive the variables from the GSE agent?
 
 if (isset($ftp_username) && isset($ftp_pass) && isset($rDir)) {
 
@@ -35,7 +35,7 @@ if (isset($ftp_username) && isset($ftp_pass) && isset($rDir)) {
     $errorCount = 0;
     $errorInstallInt = 0;
 
-    // GSP should be doing this validation before calling this helper.
+    // GSE should be doing this validation before calling this helper.
     
     // Custom directory validation
 

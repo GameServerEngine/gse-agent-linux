@@ -1,10 +1,10 @@
 # Linux Agent Operations Guide
 
-This guide covers installation, configuration, service management, and troubleshooting for the GSP Linux Agent.
+This guide covers installation, configuration, service management, and troubleshooting for the GSE Linux Agent.
 
 ## Purpose
 
-The Linux agent exposes the RPC endpoint that allows GameServer Panel to install, start, stop, update, and monitor game servers on Linux hosts.
+The Linux agent exposes the RPC endpoint that allows Gameserver Engine to install, start, stop, update, and monitor game servers on Linux hosts.
 
 ## Supported Platforms
 
@@ -39,7 +39,7 @@ Default choices:
 - Linux user: `gameserver`
 - service name: `gsp_agent`
 - log file: `/home/gameserver/GSP/gsp_agent.log`
-- Git repository: `ssh://git@173.208.136.14/GSP/GSP-Agent-Linux.git`
+- Git repository: `https://git.runlevelsystems.com/GSE/Agent-Linux`
 - Git branch: `unstable`
 - repository source path: `.`
 
@@ -60,7 +60,7 @@ sudo ./install.sh --reconfigure
 
 The installer calls `agent_conf.sh --guided`. The guided configuration asks for the agent key/shared secret, listen IP, listen port, Panel API URL, Panel event receiver URL, remote server ID, FTP management setting, FTP method, game-server autorestart setting, restart-time agent auto-update setting, update repository URL, update branch, and update source path.
 
-The agent key/shared secret must match the remote-server record in the GSP Panel.
+The agent key/shared secret must match the remote-server record in the GSE Panel.
 
 ## Configuration Files
 
@@ -93,6 +93,8 @@ Compatibility aliases are still written for older panel/agent paths:
 
 - `gsp_manages_ftp`
 - `gsp_autorestart_server`
+
+The `gsp_` config keys, `X-GSP-*` event headers, `GSP_*` screen-session prefixes, `GSP_WORKSHOP_*` completion markers, `gsp_agent` service/script names, and default `/home/gameserver/GSP` runtime path remain compatibility identifiers. Do not rename them without a coordinated Panel and installed-agent migration.
 
 Important `bash_prefs.cfg` keys:
 
@@ -195,7 +197,7 @@ Use noninteractive flags when automating:
   --web-api-url https://panel.example.com/gsp_api.php \
   --agent-event-url https://panel.example.com/agent_event_receiver.php \
   --remote-server-id 1 \
-  --repo-url ssh://git@173.208.136.14/GSP/GSP-Agent-Linux.git \
+  --repo-url https://git.runlevelsystems.com/GSE/Agent-Linux \
   --repo-branch unstable \
   --source-path .
 ```

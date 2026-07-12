@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 #
-# GameServer Panel Linux Agent
+# Gameserver Engine Linux Agent
 # Copyright (C) 2008 - 2018 The GSP Development Team
 #
 # This program is free software; you can redistribute it and/or
@@ -700,7 +700,7 @@ open(PID, '>', $agent_pid_file)
 print PID "$$\n";
 close(PID);
 
-logger "GameServer Panel - Agent started - "
+logger "Gameserver Engine - Agent started - "
   . AGENT_VERSION
   . " - port "
   . AGENT_PORT
@@ -828,7 +828,7 @@ my $d = Frontier::Daemon::GSP::Forking->new(
 			 LocalPort => AGENT_PORT,
 			 LocalAddr => AGENT_IP,
 			 ReuseAddr => '1'
-) or die "Couldn't start GSP Agent: $!";
+) or die "Couldn't start GSE Agent: $!";
 
 sub backup_home_log
 {
@@ -1697,7 +1697,7 @@ sub universal_start_without_decrypt
 		}
 	}
 
-	# Fix perms on the GSP agent user's homedir so other users can access owned files within this dir.
+	# Fix perms on the GSE agent user's homedir so other users can access owned files within this dir.
 	my $fixGSPHomeDirCommand = 'chmod -R ug+rwx $( getent passwd "' . $gspAgentGroup . '" | cut -d: -f6 )';
 	sudo_exec_without_decrypt($fixGSPHomeDirCommand);
 
@@ -1795,7 +1795,7 @@ sub universal_start_without_decrypt
 	my $run_before_start;
 	prepare_server_content_runtime_without_decrypt($home_path);
 
-	# Replace any GSP variables found in the command line
+	# Replace any GSP compatibility variables found in the command line
 	$startup_cmd = replace_GSP_Env_Vars($screen_id, $home_id, $home_path, $startup_cmd, $game_key);
 
 	if($file_extension eq ".exe" or $file_extension eq ".bat")
@@ -4499,7 +4499,7 @@ sub collect_and_insert_process_samples
 			# Avoid duplicates by checking if we already processed this PID
 			next if grep { $_->{pid} == $pid } @processes;
 
-			# Only process if this executable has a startup file (is managed by GSP)
+			# Only process if this executable has a startup file (is managed by GSE)
 			if (exists $startup_executables{$exe_name}) {
 				my $startup_info = $startup_executables{$exe_name};
 				# Use the actual server ID from the startup file
@@ -4509,7 +4509,7 @@ sub collect_and_insert_process_samples
 				my $proc_info = get_process_info($pid, $server_name, $server_path);
 				push @processes, $proc_info if $proc_info;
 			}
-			# If no startup file exists for this executable, we skip it (not managed by GSP)
+			# If no startup file exists for this executable, we skip it (not managed by GSE)
 		}
 	}
 
@@ -5118,7 +5118,7 @@ sub ftp_mgr
 
 			chmod 0777, 'ehcp_ftp_log.txt';
 
-			# In order to access the FTP files, the vsftpd user needs to be added to the GSP group
+			# In order to access the FTP files, the vsftpd user needs to be added to the GSE agent group
 			sudo_exec_without_decrypt("usermod -a -G '$gid' ftp");
 			sudo_exec_without_decrypt("usermod -a -G '$gid' vsftpd");
 			sudo_exec_without_decrypt("usermod -a -G '$gidTwo' ftp");
@@ -6005,11 +6005,11 @@ sub agent_restart
 				}
 
 				open (AGENT_RESTART_SCRIPT, '>', 'tmp_restart.sh');
-				my $restart = "echo -n \"Stopping GSP Agent...\"\n".
+				my $restart = "echo -n \"Stopping GSE Agent...\"\n".
 							  "kill $init_pid\n".
 							  "while [ -e /proc/$init_pid $or_exist ];do echo -n .;sleep 1;done\n".
 								  "rm -f gsp_agent_run.pid $rm_pid_file\necho \" [OK]\"\n".
-							  "echo -n \"Starting GSP Agent...\"\n".
+							  "echo -n \"Starting GSE Agent...\"\n".
 							  "screen -d -m -t \"gsp_agent\" -c \"" . SCREENRC_FILE . "\" -S gsp_agent bash gsp_agent_run -pidfile gsp_agent_run.pid\n".
 							  "while [ ! -e gsp_agent_run.pid -o ! -e gsp_agent.pid ];do echo -n .;sleep 1;done\n".
 							  "echo \" [OK]\"\n".

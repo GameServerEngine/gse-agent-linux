@@ -7,7 +7,7 @@ agent_user=GSP_USER
 
 # Start function.
 start() {
-    echo "Starting GSP Agent..."
+    echo "Starting GSE Agent..."
     cd $agent_dir
     su -c "screen -d -m -t gsp_agent -c gsp_screenrc -S gsp_agent ./gsp_agent_run -pidfile gsp_agent_run.pid" $agent_user &> $agent_dir/gsp_agent.svc &
     echo
@@ -15,7 +15,7 @@ start() {
 
 # Stop function.
 stop() {
-    echo "Stopping GSP Agent..."
+    echo "Stopping GSE Agent..."
     kill `cat $agent_dir/gsp_agent_run.pid`
 }
 

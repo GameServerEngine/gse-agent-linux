@@ -56,7 +56,7 @@ $windows = ['1h'=>1, '24h'=>24, '7d'=>168];
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>GSP Stats Dashboard<?php if ($machine) { 
+<title>GSE Stats Dashboard<?php if ($machine) {
   $title_machine_info = q($mysqli, "SELECT hostname FROM {$TABLE_PREFIX}machines WHERE machine_id = ?", [$machine]);
   $title_hostname = $title_machine_info ? $title_machine_info[0]['hostname'] : $machine;
   echo " – ".htmlspecialchars($title_hostname);
@@ -103,7 +103,7 @@ $windows = ['1h'=>1, '24h'=>24, '7d'=>168];
 <body>
 <div class="wrap">
   <div class="topbar">
-    <h1>GSP Stats Dashboard</h1>
+    <h1>GSE Stats Dashboard</h1>
     <span class="pill"><?= $AUTO_REFRESH_SECONDS>0 ? "auto-refresh {$AUTO_REFRESH_SECONDS}s" : "manual refresh" ?></span>
     <a class="btn" href="?">All machines</a>
     <?php if($machine): ?>

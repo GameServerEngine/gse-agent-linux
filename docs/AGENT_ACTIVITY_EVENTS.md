@@ -1,6 +1,6 @@
 # Linux Agent Activity Events
 
-The Linux agent can report meaningful server lifecycle events to the GSP Panel activity log. It does not send routine XML-RPC chatter, file reads, status polls with no state change, or every local agent log line.
+The Linux agent can report meaningful server lifecycle events to the GSE Panel activity log. It does not send routine XML-RPC chatter, file reads, status polls with no state change, or every local agent log line.
 
 ## Configuration
 
@@ -26,6 +26,8 @@ Events are JSON POST requests signed with HMAC-SHA256:
 - `X-GSP-Agent-Id`: Panel `remote_server_id`
 - `X-GSP-Agent-Timestamp`: Unix timestamp
 - `X-GSP-Agent-Signature`: `sha256=` plus HMAC of `timestamp.body`
+
+The `X-GSP-*` header names are retained as protocol compatibility identifiers.
 
 The Panel validates the signature, remote server identity, event type, severity, and `home_id` ownership before writing the activity log.
 

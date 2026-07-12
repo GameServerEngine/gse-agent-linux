@@ -1,12 +1,12 @@
 #!/bin/sh
 
 #
-#   Startup/shutdown script for the GSP Agent.
+#   Startup/shutdown script for the GSE Agent.
 #
 #   Linux chkconfig stuff:
 #
 #   chkconfig: 2345 88 10
-#   description: Startup/shutdown script for the GSP Agent
+#   description: Startup/shutdown script for the GSE Agent
 
 agent_dir=GSP_AGENT_DIR
 agent_user=GSP_USER
@@ -32,7 +32,7 @@ then
 fi
 
 start() {
-	echo -n "Starting GSP Agent: "
+	echo -n "Starting GSE Agent: "
 	if [ -e "$agent_dir/gsp_agent_run.pid" ]; then
 		PID=`cat $agent_dir/gsp_agent_run.pid`
 		RET=$(kill -s 0 $PID &> /dev/null; echo $?)
@@ -112,7 +112,7 @@ start() {
 
 stop() {
 	# Stop daemon
-	echo -n "Stopping GSP Agent: "
+	echo -n "Stopping GSE Agent: "
 	if [ -f $agent_dir/gsp_agent_run.pid ]
 	then
 		PID=`cat $agent_dir/gsp_agent_run.pid`

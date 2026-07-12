@@ -14,7 +14,7 @@ use File::Find;
 # Load the config to verify it works
 use Cfg::Config;
 
-print "=== GSP Agent Resource Monitoring Demo ===\n\n";
+print "=== GSE Agent Resource Monitoring Demo ===\n\n";
 
 # Test 1: Configuration Loading
 print "1. Testing Configuration Loading:\n";
@@ -127,6 +127,6 @@ print "To enable it:\n";
 print "1. Configure database settings in Cfg/Config.pm\n";
 print "2. Import SQL schema files from DB/ directory\n";
 print "3. Install DBI and DBD::mysql Perl modules\n";
-print "4. Restart the GSP Agent\n";
+print "4. Restart the GSE Agent\n";
 print "\nThe system will automatically start collecting resource data\n";
 print "every " . ($Cfg::Config{stats_frequency_minutes} || '5') . " minutes when enabled.\n";
