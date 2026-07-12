@@ -21,11 +21,13 @@ Modes:
   install       Clone, configure, install service, and optionally start it. Default.
   repair        Re-copy agent code from repo/branch, preserve runtime config/data.
   reconfigure   Regenerate Cfg/Config.pm, Cfg/Preferences.pm, and Cfg/bash_prefs.cfg.
+  uninstall     Remove the managed service and source-owned agent files.
 
 Options:
-  --mode MODE              install, repair, or reconfigure.
+  --mode MODE              install, repair, reconfigure, or uninstall.
   --repair                 Alias for --mode repair.
   --reconfigure            Alias for --mode reconfigure.
+  --uninstall              Alias for --mode uninstall.
   --install-dir PATH       Install directory. Default: ${DEFAULT_INSTALL_DIR}
   --agent-user USER        Linux user that runs the agent. Default: ${DEFAULT_AGENT_USER}
   --service-name NAME      systemd service name. Default: ${DEFAULT_SERVICE_NAME}
@@ -34,6 +36,7 @@ Options:
   --source-path PATH       Agent source path inside repo. Default: ${DEFAULT_SOURCE_PATH}
   --no-service             Configure files but do not install a systemd service.
   --no-prereqs             Do not offer to run install_agent_prereqs.sh.
+  --purge-data             With uninstall, remove the whole install directory.
   --non-interactive        Fail instead of prompting for missing decisions.
   --dry-run                Validate inputs and print planned actions without changing files.
   --help                   Show this help.
@@ -114,6 +117,34 @@ validate_repo_settings() {
 	[[ "$SOURCE_PATH" =~ ^[A-Za-z0-9._/-]+$ && "$SOURCE_PATH" != *".."* ]] || fail "Invalid source path: $SOURCE_PATH"
 }
 
+validate_staged_payload() {
+	local source_dir="$1"
+	[ -d "$source_dir" ] || fail "Source path does not exist in clone: $source_dir"
+	[ -s "$source_dir/gsp_agent.pl" ] || fail "Source path is missing gsp_agent.pl: $source_dir"
+	[ -s "$source_dir/gsp_agent_run" ] || fail "Source path is missing gsp_agent_run: $source_dir"
+	[ -s "$source_dir/agent_conf.sh" ] || fail "Source path is missing agent_conf.sh: $source_dir"
+	[ -s "$source_dir/install.sh" ] || fail "Source path is missing install.sh: $source_dir"
+	[ -s "$source_dir/install_agent_prereqs.sh" ] || fail "Source path is missing install_agent_prereqs.sh: $source_dir"
+	[ -s "$source_dir/systemd/gsp_agent.service" ] || fail "Source path is missing systemd/gsp_agent.service: $source_dir"
+
+	(cd "$source_dir" && perl -c gsp_agent.pl >/dev/null) || fail "Staged gsp_agent.pl failed Perl syntax validation."
+	bash -n "$source_dir/install.sh" || fail "Staged install.sh failed Bash syntax validation."
+	bash -n "$source_dir/install_agent_prereqs.sh" || fail "Staged install_agent_prereqs.sh failed Bash syntax validation."
+	bash -n "$source_dir/agent_conf.sh" || fail "Staged agent_conf.sh failed Bash syntax validation."
+	bash -n "$source_dir/gsp_agent_run" || fail "Staged gsp_agent_run failed Bash syntax validation."
+}
+
+validate_installed_payload() {
+	local install_dir="$1"
+	[ -s "$install_dir/gsp_agent.pl" ] || fail "Installed gsp_agent.pl is missing or empty."
+	[ -s "$install_dir/gsp_agent_run" ] || fail "Installed gsp_agent_run is missing or empty."
+	(cd "$install_dir" && perl -c gsp_agent.pl >/dev/null) || fail "Installed gsp_agent.pl failed Perl syntax validation."
+	bash -n "$install_dir/install.sh" || fail "Installed install.sh failed Bash syntax validation."
+	bash -n "$install_dir/install_agent_prereqs.sh" || fail "Installed install_agent_prereqs.sh failed Bash syntax validation."
+	bash -n "$install_dir/agent_conf.sh" || fail "Installed agent_conf.sh failed Bash syntax validation."
+	bash -n "$install_dir/gsp_agent_run" || fail "Installed gsp_agent_run failed Bash syntax validation."
+}
+
 install_service() {
 	local install_dir="$1"
 	local agent_user="$2"
@@ -169,9 +200,7 @@ source_revision() {
 copy_agent_tree() {
 	local source_dir="$1"
 	local install_dir="$2"
-	[ -d "$source_dir" ] || fail "Source path does not exist in clone: $source_dir"
-	[ -s "$source_dir/gsp_agent.pl" ] || fail "Source path is missing gsp_agent.pl: $source_dir"
-	[ -s "$source_dir/gsp_agent_run" ] || fail "Source path is missing gsp_agent_run: $source_dir"
+	validate_staged_payload "$source_dir"
 
 	if [ "$DRY_RUN" -eq 1 ]; then
 		log "DRY-RUN: would copy agent code from ${source_dir} to ${install_dir}"
@@ -198,6 +227,72 @@ copy_agent_tree() {
 		--exclude='agent_restart_update_backup.tar.gz' \
 		--exclude='*.pid' \
 		"${source_dir%/}/" "${install_dir}/"
+}
+
+remove_service() {
+	local service_name="$1"
+	local unit_path="/etc/systemd/system/${service_name}.service"
+
+	command -v systemctl >/dev/null 2>&1 || return 0
+	if [ "$DRY_RUN" -eq 1 ]; then
+		log "DRY-RUN: would stop, disable, and remove ${unit_path}"
+		return 0
+	fi
+	systemctl stop "$service_name.service" >/dev/null 2>&1 || true
+	systemctl disable "$service_name.service" >/dev/null 2>&1 || true
+	rm -f "$unit_path"
+	systemctl daemon-reload
+}
+
+remove_managed_agent_files() {
+	local install_dir="$1"
+	local managed_dirs=(
+		ArmaBE Crypt EHCP File Frontier IspConfig KKrcon Minecraft Time
+		db docs documentation includes php-query systemd
+	)
+	local managed_files=(
+		COPYING DEVELOPMENT README.md agent_conf.sh extPatterns.txt
+		gsp_agent.pl gsp_agent_run gsp_screenrc gsp_screenrc_bk
+		install.sh install_agent_prereqs.sh resource_usage_test.pl
+		.gsp_agent_source_revision
+	)
+
+	if [ "$DRY_RUN" -eq 1 ]; then
+		log "DRY-RUN: would remove managed agent files from ${install_dir}"
+		return 0
+	fi
+
+	for dir in "${managed_dirs[@]}"; do
+		rm -rf "${install_dir:?}/${dir}"
+	done
+	for file in "${managed_files[@]}"; do
+		rm -f "${install_dir}/${file}"
+	done
+	find "$install_dir" -type d -empty -delete 2>/dev/null || true
+}
+
+uninstall_agent() {
+	local install_dir="$1"
+	local service_name="$2"
+
+	validate_safe_path "$install_dir"
+	remove_service "$service_name"
+	if [ "$PURGE_DATA" -eq 1 ]; then
+		if [ "$NON_INTERACTIVE" -eq 0 ]; then
+			ask_yes_no "Permanently remove ${install_dir} and all customer data under it?" "no" || fail "Uninstall purge cancelled."
+		fi
+		if [ "$DRY_RUN" -eq 1 ]; then
+			log "DRY-RUN: would remove ${install_dir}"
+		else
+			rm -rf "$install_dir"
+		fi
+	else
+		if [ -d "$install_dir" ]; then
+			remove_managed_agent_files "$install_dir"
+		else
+			log "Install directory does not exist: ${install_dir}"
+		fi
+	fi
 }
 
 ensure_runtime_dirs() {
@@ -244,6 +339,7 @@ REPO_BRANCH=""
 SOURCE_PATH=""
 INSTALL_SERVICE=1
 OFFER_PREREQS=1
+PURGE_DATA=0
 NON_INTERACTIVE=0
 DRY_RUN=0
 
@@ -252,6 +348,7 @@ while [ "$#" -gt 0 ]; do
 		--mode) MODE="${2:-}"; shift 2 ;;
 		--repair) MODE="repair"; shift ;;
 		--reconfigure) MODE="reconfigure"; shift ;;
+		--uninstall) MODE="uninstall"; shift ;;
 		--install-dir) INSTALL_DIR="${2:-}"; shift 2 ;;
 		--agent-user) AGENT_USER="${2:-}"; shift 2 ;;
 		--service-name) SERVICE_NAME="${2:-}"; shift 2 ;;
@@ -260,6 +357,7 @@ while [ "$#" -gt 0 ]; do
 		--source-path) SOURCE_PATH="${2:-}"; shift 2 ;;
 		--no-service) INSTALL_SERVICE=0; shift ;;
 		--no-prereqs) OFFER_PREREQS=0; shift ;;
+		--purge-data) PURGE_DATA=1; shift ;;
 		--non-interactive) NON_INTERACTIVE=1; shift ;;
 		--dry-run) DRY_RUN=1; shift ;;
 		--help|-h) usage; exit 0 ;;
@@ -268,7 +366,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$MODE" in
-	install|repair|reconfigure) ;;
+	install|repair|reconfigure|uninstall) ;;
 	*) fail "Unknown mode: $MODE" ;;
 esac
 
@@ -280,7 +378,7 @@ log "This installer configures the Linux execution agent for Gameserver Engine."
 log "Use the same key/password configured for this remote server in the Panel."
 log
 
-if [ "$OFFER_PREREQS" -eq 1 ] && [ "$MODE" != "reconfigure" ] && [ -x "${SCRIPT_DIR}/install_agent_prereqs.sh" ]; then
+if [ "$OFFER_PREREQS" -eq 1 ] && [ "$MODE" != "reconfigure" ] && [ "$MODE" != "uninstall" ] && [ -x "${SCRIPT_DIR}/install_agent_prereqs.sh" ]; then
 	if ask_yes_no "Run install_agent_prereqs.sh before installing?" "yes"; then
 		if [ "$DRY_RUN" -eq 1 ]; then
 			log "DRY-RUN: would run ${SCRIPT_DIR}/install_agent_prereqs.sh"
@@ -288,27 +386,41 @@ if [ "$OFFER_PREREQS" -eq 1 ] && [ "$MODE" != "reconfigure" ] && [ -x "${SCRIPT_
 			bash "${SCRIPT_DIR}/install_agent_prereqs.sh"
 		fi
 	fi
-elif [ "$OFFER_PREREQS" -eq 1 ] && [ "$MODE" != "reconfigure" ]; then
+elif [ "$OFFER_PREREQS" -eq 1 ] && [ "$MODE" != "reconfigure" ] && [ "$MODE" != "uninstall" ]; then
 	log "Prerequisite installer is not executable. Run: chmod +x install_agent_prereqs.sh && sudo ./install_agent_prereqs.sh"
 fi
 
 INSTALL_DIR="${INSTALL_DIR:-$(ask "Install directory" "$DEFAULT_INSTALL_DIR")}"
-AGENT_USER="${AGENT_USER:-$(ask "Agent Linux user" "$DEFAULT_AGENT_USER")}"
 SERVICE_NAME="${SERVICE_NAME:-$(ask "systemd service name" "$DEFAULT_SERVICE_NAME")}"
-REPO_URL="${REPO_URL:-$(ask "GSE Linux agent Git repository URL" "$DEFAULT_REPO_URL")}"
-REPO_BRANCH="${REPO_BRANCH:-$(ask "GSE Linux agent Git branch" "$DEFAULT_REPO_BRANCH")}"
-SOURCE_PATH="${SOURCE_PATH:-$(ask "Agent source path inside repository" "$DEFAULT_SOURCE_PATH")}"
+if [ "$MODE" != "uninstall" ]; then
+	AGENT_USER="${AGENT_USER:-$(ask "Agent Linux user" "$DEFAULT_AGENT_USER")}"
+	REPO_URL="${REPO_URL:-$(ask "GSE Linux agent Git repository URL" "$DEFAULT_REPO_URL")}"
+	REPO_BRANCH="${REPO_BRANCH:-$(ask "GSE Linux agent Git branch" "$DEFAULT_REPO_BRANCH")}"
+	SOURCE_PATH="${SOURCE_PATH:-$(ask "Agent source path inside repository" "$DEFAULT_SOURCE_PATH")}"
+fi
 
 INSTALL_DIR="${INSTALL_DIR%/}"
 validate_safe_path "$INSTALL_DIR"
-validate_repo_settings
+if [ "$MODE" != "uninstall" ]; then
+	validate_repo_settings
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
 	log "DRY-RUN: mode=${MODE}"
 	log "DRY-RUN: install_dir=${INSTALL_DIR}"
-	log "DRY-RUN: agent_user=${AGENT_USER}"
 	log "DRY-RUN: service_name=${SERVICE_NAME}"
-	log "DRY-RUN: repo=${REPO_URL} branch=${REPO_BRANCH} source_path=${SOURCE_PATH}"
+	if [ "$MODE" != "uninstall" ]; then
+		log "DRY-RUN: agent_user=${AGENT_USER}"
+		log "DRY-RUN: repo=${REPO_URL} branch=${REPO_BRANCH} source_path=${SOURCE_PATH}"
+	else
+		uninstall_agent "$INSTALL_DIR" "$SERVICE_NAME"
+	fi
+	exit 0
+fi
+
+if [ "$MODE" = "uninstall" ]; then
+	uninstall_agent "$INSTALL_DIR" "$SERVICE_NAME"
+	log "GSE Linux Agent uninstall complete. Runtime/customer data was preserved unless --purge-data was used."
 	exit 0
 fi
 
@@ -352,6 +464,7 @@ elif [ "$MODE" = "reconfigure" ]; then
 fi
 
 chown -R "${AGENT_USER}:${AGENT_USER}" "$INSTALL_DIR"
+validate_installed_payload "$INSTALL_DIR"
 
 if [ "$INSTALL_SERVICE" -eq 1 ]; then
 	install_service "$INSTALL_DIR" "$AGENT_USER" "$SERVICE_NAME"

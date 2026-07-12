@@ -51,9 +51,14 @@ The Linux agent exposes these structured RPCs for the Admin -> Servers per-agent
 
 - `agent_version` returns OS, agent code build version, and install path. The code build version is used even when legacy config files still contain an old `version` value.
 - `agent_resource_snapshot` returns CPU, RAM, disk, load average, OS, code build version, and install path for Panel-side caching.
+- `server_status` keeps Linux-native process/session/port checks and returns shared readiness fields used by the Panel on both agents, including port-validation settings, expected/listening/missing ports, `CPUUsage`, `MemoryUsage`, `ProcessRunning`, `StatusState`, `linux_pid`, and compatibility aliases.
 - `force_stop_server(home_id, server_ip, server_port, home_path)` removes the matching startup flag, marks `FORCE_STOPPING`, kills only tracked PID/session targets and the process owning the assigned game port, verifies session/process/port are stopped, and returns a structured result. It never restarts the game server.
 - `agent_self_update(payload)` records a pending restart-time update request.
 - `agent_update_status` returns the latest `gsp_agent_update_state.json` content.
+
+## Installer Lifecycle
+
+`install.sh` supports `install`, `repair`, `reconfigure`, and `uninstall`. Install and repair fetch the configured canonical Git repository and branch, validate the staged payload, copy source-owned files, and preserve customer/runtime state. Reconfigure regenerates local config only. Uninstall removes the managed systemd service and known source-owned agent files while preserving customer data by default; `--purge-data` is the explicit destructive path.
 
 ## Self-Update And Rollback
 

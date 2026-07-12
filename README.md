@@ -33,6 +33,14 @@ sudo ./install.sh --repair
 sudo ./install.sh --reconfigure
 ```
 
+Uninstall the managed service and source-owned agent files while preserving configuration, game-server homes, logs, SteamCMD data, Workshop content, runtime state, and customer files:
+
+```bash
+sudo ./install.sh --uninstall
+```
+
+`--purge-data` removes the full install directory and should only be used after separately backing up customer data.
+
 ## Service Commands
 
 ```bash

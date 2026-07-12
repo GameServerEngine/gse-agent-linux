@@ -74,6 +74,12 @@ use constant STATS_TABLE_PREFIX => $Cfg::Config{stats_table_prefix};
 use constant STATS_FREQUENCY_MINUTES => $Cfg::Config{stats_frequency_minutes};
 use constant SCREEN_LOG_LOCAL  => $Cfg::Preferences{screen_log_local};
 use constant DELETE_LOGS_AFTER  => $Cfg::Preferences{delete_logs_after};
+use constant PORT_VALIDATION_ENABLED =>
+  defined($Cfg::Preferences{PortValidationEnabled}) ? $Cfg::Preferences{PortValidationEnabled} : 1;
+use constant STARTUP_VALIDATION_TIMEOUT =>
+  defined($Cfg::Preferences{StartupValidationTimeoutSeconds}) ? $Cfg::Preferences{StartupValidationTimeoutSeconds} : 180;
+use constant PORT_CHECK_INTERVAL_SECONDS =>
+  defined($Cfg::Preferences{PortCheckIntervalSeconds}) ? $Cfg::Preferences{PortCheckIntervalSeconds} : 5;
 use constant LINUX_USER_PER_GAME_SERVER  => $Cfg::Preferences{linux_user_per_game_server};
 use constant AGENT_PID_FILE =>
   Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent.pid');
@@ -1492,10 +1498,63 @@ sub is_port_listening_without_decrypt
 	return 0;
 }
 
+sub add_expected_port
+{
+	my ($ports, $name, $port, $protocol) = @_;
+	return unless(defined($port) && $port =~ /^[0-9]+$/ && $port > 0 && $port <= 65535);
+	$protocol = "any" unless(defined($protocol) && $protocol =~ /^(tcp|udp|any)$/i);
+	push(@$ports, { name => $name, port => int($port), protocol => lc($protocol) });
+}
+
+sub build_expected_ports
+{
+	my ($server_port, $query_port, $rcon_port) = @_;
+	my @expected_ports = ();
+	add_expected_port(\@expected_ports, "game", $server_port, "any");
+	foreach my $part (split(/[\s,;]+/, $query_port || ""))
+	{
+		add_expected_port(\@expected_ports, "query", $part, "any");
+	}
+	foreach my $part (split(/[\s,;]+/, $rcon_port || ""))
+	{
+		add_expected_port(\@expected_ports, "rcon", $part, "any");
+	}
+	return @expected_ports;
+}
+
+sub validate_expected_ports
+{
+	my ($server_ip, @expected_ports) = @_;
+	my @listening_ports = ();
+	my @missing_ports = ();
+	foreach my $expected (@expected_ports)
+	{
+		if(is_port_listening_without_decrypt($server_ip, $expected->{port}, $expected->{protocol}))
+		{
+			push(@listening_ports, $expected);
+		}
+		else
+		{
+			push(@missing_ports, $expected);
+		}
+	}
+	return (\@listening_ports, \@missing_ports);
+}
+
+sub has_listening_port_named
+{
+	my ($ports, $name) = @_;
+	foreach my $port (@$ports)
+	{
+		return 1 if($port->{name} eq $name);
+	}
+	return 0;
+}
+
 sub server_status_without_decrypt
 {
 	my ($home_id, $server_ip, $server_port, $query_port, $rcon_port, $startup_timeout, $state_hint) = @_;
-	$startup_timeout = 180 unless(defined($startup_timeout) && $startup_timeout =~ /^[0-9]+$/ && $startup_timeout > 0);
+	$startup_timeout = STARTUP_VALIDATION_TIMEOUT unless(defined($startup_timeout) && $startup_timeout =~ /^[0-9]+$/ && $startup_timeout > 0);
 	$query_port = "" unless(defined($query_port) && $query_port =~ /^[0-9,;:\s\/a-zA-Z]+$/);
 	$rcon_port = "" unless(defined($rcon_port) && $rcon_port =~ /^[0-9,;:\s\/a-zA-Z]+$/);
 	$state_hint = "" unless(defined($state_hint));
@@ -1510,52 +1569,20 @@ sub server_status_without_decrypt
 	$pid_running = 1 if($screen_pid ne "" && is_pid_alive_without_decrypt($screen_pid) == 1);
 	$pid_running = 1 if(!$pid_running && $game_pid ne "" && is_pid_alive_without_decrypt($game_pid) == 1);
 	my $process_running = ($session_running || $pid_running) ? 1 : 0;
-	my @expected_ports = ();
-	my @listening_ports = ();
-	my @missing_ports = ();
-	if(defined($server_port) && $server_port =~ /^[0-9]+$/ && $server_port > 0)
-	{
-		push(@expected_ports, { name => "game", port => int($server_port), protocol => "any" });
-	}
-	if(defined($query_port) && $query_port ne "")
-	{
-		foreach my $part (split(/[\s,;]+/, $query_port))
-		{
-			next unless($part =~ /^[0-9]+$/ && $part > 0 && $part <= 65535);
-			push(@expected_ports, { name => "query", port => int($part), protocol => "any" });
-		}
-	}
-	if(defined($rcon_port) && $rcon_port ne "")
-	{
-		foreach my $part (split(/[\s,;]+/, $rcon_port))
-		{
-			next unless($part =~ /^[0-9]+$/ && $part > 0 && $part <= 65535);
-			push(@expected_ports, { name => "rcon", port => int($part), protocol => "any" });
-		}
-	}
-	foreach my $expected (@expected_ports)
-	{
-		if(is_port_listening_without_decrypt($server_ip, $expected->{port}, $expected->{protocol}))
-		{
-			push(@listening_ports, $expected);
-		}
-		else
-		{
-			push(@missing_ports, $expected);
-		}
-	}
-	my $game_port_listening = 0;
-	my $query_port_listening = 0;
-	my $rcon_port_listening = 0;
-	foreach my $port (@listening_ports)
-	{
-		$game_port_listening = 1 if($port->{name} eq "game");
-		$query_port_listening = 1 if($port->{name} eq "query");
-		$rcon_port_listening = 1 if($port->{name} eq "rcon");
-	}
+	my @expected_ports = build_expected_ports($server_port, $query_port, $rcon_port);
+	my ($listening_ports, $missing_ports) = PORT_VALIDATION_ENABLED ? validate_expected_ports($server_ip, @expected_ports) : ([], []);
 	my $expected_count = scalar(@expected_ports);
-	my $listening_count = scalar(@listening_ports);
-	my $missing_count = scalar(@missing_ports);
+	my $listening_count = scalar(@$listening_ports);
+	my $missing_count = scalar(@$missing_ports);
+	my $game_port_listening = has_listening_port_named($listening_ports, "game");
+	my $query_port_listening = has_listening_port_named($listening_ports, "query");
+	my $rcon_port_listening = has_listening_port_named($listening_ports, "rcon");
+	if(!PORT_VALIDATION_ENABLED)
+	{
+		$game_port_listening = is_port_listening_without_decrypt($server_ip, $server_port);
+		$query_port_listening = $query_port ne "" ? is_port_listening_without_decrypt($server_ip, $query_port) : 0;
+		$rcon_port_listening = $rcon_port ne "" ? is_port_listening_without_decrypt($server_ip, $rcon_port) : 0;
+	}
 	my ($hint_timestamp, $stored_hint) = read_status_hint($home_id);
 	my $effective_hint = $state_hint ne "" ? $state_hint : $stored_hint;
 	my $last_error = "";
@@ -1563,28 +1590,34 @@ sub server_status_without_decrypt
 	my $status_state = "Unknown";
 	my $ready = 0;
 
-	if(!$process_running && $listening_count > 0)
+	if(!$process_running && ((!PORT_VALIDATION_ENABLED && $game_port_listening) || ($expected_count > 0 && $listening_count > 0)))
 	{
 		$status = "WARNING";
 		$status_state = "Warning";
 		$last_error = "Required port is listening but the managed process/session is not running.";
 	}
-	elsif($process_running && $expected_count > 0 && $missing_count == 0)
-	{
-		$status = "ONLINE";
-		$status_state = "Running";
-		$ready = 1;
-	}
-	elsif($process_running && $expected_count > 0 && $listening_count > 0)
-	{
-		$status = "ONLINE";
-		$status_state = "Warning";
-		$ready = 1;
-		$last_error = "Process/session exists, but some expected ports are not listening.";
-	}
 	elsif($process_running)
 	{
-		if($effective_hint eq "STOPPING")
+		if(!PORT_VALIDATION_ENABLED && $game_port_listening)
+		{
+			$status = "ONLINE";
+			$status_state = "Running";
+			$ready = 1;
+		}
+		elsif(PORT_VALIDATION_ENABLED && $expected_count > 0 && $missing_count == 0)
+		{
+			$status = "ONLINE";
+			$status_state = "Running";
+			$ready = 1;
+		}
+		elsif(PORT_VALIDATION_ENABLED && $expected_count > 0 && $listening_count > 0)
+		{
+			$status = "ONLINE";
+			$status_state = "Warning";
+			$ready = 1;
+			$last_error = "Process/session exists, but some expected ports are not listening.";
+		}
+		elsif($effective_hint eq "STOPPING")
 		{
 			$status = "STOPPING";
 			$status_state = "Stopping";
@@ -1621,12 +1654,17 @@ sub server_status_without_decrypt
 		game_port_listening => $game_port_listening ? 1 : 0,
 		query_port_listening => $query_port_listening ? 1 : 0,
 		rcon_port_listening => $rcon_port_listening ? 1 : 0,
+		PortValidationEnabled => PORT_VALIDATION_ENABLED ? 1 : 0,
+		StartupValidationTimeoutSeconds => $startup_timeout,
+		PortCheckIntervalSeconds => PORT_CHECK_INTERVAL_SECONDS,
 		ExpectedPorts => \@expected_ports,
 		expected_ports => \@expected_ports,
-		ListeningPorts => \@listening_ports,
-		listening_ports => \@listening_ports,
-		MissingPorts => \@missing_ports,
-		missing_ports => \@missing_ports,
+		ListeningPorts => $listening_ports,
+		listening_ports => $listening_ports,
+		MissingPorts => $missing_ports,
+		missing_ports => $missing_ports,
+		CPUUsage => agent_cpu_usage_percent(),
+		MemoryUsage => agent_ram_usage_percent(),
 		pid => $game_pid ne "" ? $game_pid : $screen_pid,
 		screen_pid => $screen_pid,
 		windows_pid => "",
@@ -2604,6 +2642,11 @@ sub force_stop_server_without_decrypt
 	}
 	my $port_listening = is_port_listening_without_decrypt($server_ip, $server_port);
 	my $success = (!$session_running && !$process_running && !$port_listening && $verify == 0) ? 1 : 0;
+	if($success)
+	{
+		clear_pid_metadata($home_id);
+		write_status_hint($home_id, "STOPPED");
+	}
 	my $message = $success ? 'Force Stop completed. The game server was not restarted.' : 'Force Stop could not fully stop the server. Review remaining process/session/port state.';
 	queue_agent_event($success ? "server_force_stop_confirmed" : "server_force_stop_failed", $success ? "warning" : "error", {
 		home_id => $home_id,
@@ -5634,11 +5677,15 @@ sub fastdl_create_config
 sub agent_read_first_line
 {
 	my ($path) = @_;
-	return "" unless(open(my $fh, '<', $path));
-	my $line = <$fh>;
-	close($fh);
-	chomp($line) if(defined($line));
-	return defined($line) ? $line : "";
+	return "" unless(defined($path) && -f $path);
+	if(open(my $fh, '<', $path))
+	{
+		my $line = <$fh>;
+		close($fh);
+		chomp($line) if(defined($line));
+		return defined($line) ? $line : "";
+	}
+	return "";
 }
 
 sub agent_cpu_usage_percent
@@ -5693,7 +5740,9 @@ sub agent_version
 {
 	return component_update_response(success => 0, status => 'bad_encryption', message => 'Bad Encryption Key')
 		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
-	return component_update_response(success => 1, status => 'ok', agent_version => AGENT_VERSION, os => `uname -s 2>/dev/null`, install_path => AGENT_RUN_DIR);
+	my $os = `uname -sr 2>/dev/null`;
+	chomp($os);
+	return component_update_response(success => 1, status => 'ok', agent_version => AGENT_VERSION, os => $os, install_path => AGENT_RUN_DIR);
 }
 
 sub agent_resource_snapshot

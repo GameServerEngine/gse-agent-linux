@@ -52,9 +52,12 @@ Repair and reconfiguration modes:
 ```bash
 sudo ./install.sh --repair
 sudo ./install.sh --reconfigure
+sudo ./install.sh --uninstall
 ```
 
 `--repair` refreshes agent code from the configured repo and preserves existing config unless reconfiguration is requested. `--reconfigure` regenerates only `Cfg/Config.pm`, `Cfg/Preferences.pm`, and `Cfg/bash_prefs.cfg`.
+
+`--uninstall` removes the managed systemd service and known source-owned agent files. It preserves `Cfg/`, `ServerFiles/`, `Schedule/`, `logs/`, `screenlogs/`, `steamcmd/`, `startups/`, `runtime_status/`, `events/`, `tmp/`, `shared/`, Workshop/content runtime folders, backups, credentials, PID/update state, and customer-created files by default. `--purge-data` removes the entire install directory and should only be used after an operator has confirmed the host contains no customer data that must be retained.
 
 ## Configuration Prompts
 
@@ -156,6 +159,10 @@ cd /home/gameserver/GSP
 ```
 
 The same `gsp_agent_run` wrapper is used by systemd and by foreground debugging. At startup it validates configuration, refuses root execution, takes an agent-local lock, checks that the configured agent port is available, applies a queued restart-time update when `agent_auto_update=1`, and then starts `gsp_agent.pl`. If another valid wrapper instance or listener already owns the configured port, startup fails without killing unrelated processes.
+
+## Server Status Contract
+
+`server_status` reports the same shared readiness fields expected by the Panel on both Linux and Windows. Linux keeps Linux-native process and port detection, but returns `PortValidationEnabled`, `StartupValidationTimeoutSeconds`, `PortCheckIntervalSeconds`, `ExpectedPorts`, `ListeningPorts`, `MissingPorts`, `CPUUsage`, `MemoryUsage`, `linux_pid`, and compatibility aliases such as `ProcessRunning` and `StatusState`.
 
 ## Restart-Time Updates
 
