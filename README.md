@@ -1,6 +1,6 @@
 # GSE Linux Agent
 
-Perl-based Linux execution agent for Gameserver Engine. The agent receives signed RPC calls from the GSE Panel and launches customer game servers on Linux hosts.
+Perl-based Linux execution agent for GameServer Engine (GSE). The agent receives signed RPC calls from the GSE Panel and launches customer game servers on Linux hosts.
 
 ## Default Layout
 

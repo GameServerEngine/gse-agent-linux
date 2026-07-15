@@ -4,7 +4,7 @@ This guide covers installation, configuration, service management, and troublesh
 
 ## Purpose
 
-The Linux agent exposes the RPC endpoint that allows Gameserver Engine to install, start, stop, update, and monitor game servers on Linux hosts.
+The Linux agent exposes the RPC endpoint that allows GameServer Engine (GSE) to install, start, stop, update, and monitor game servers on Linux hosts.
 
 ## Supported Platforms
 
