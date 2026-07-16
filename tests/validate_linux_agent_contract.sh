@@ -45,9 +45,20 @@ require_file "$repo_root/agent_conf.sh"
 require_file "$repo_root/gsp_agent_run"
 require_file "$repo_root/systemd/gsp_agent.service"
 require_file "$repo_root/Cfg/bash_prefs.cfg.default"
+require_file "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh"
+require_file "$repo_root/steamcmd/steamcmd.sh"
+require_file "$repo_root/steamcmd/linux32/steamcmd"
+require_file "$repo_root/steamcmd/linux32/steamerrorreporter"
+require_file "$repo_root/steamcmd/linux32/libstdc++.so.6"
+require_file "$repo_root/steamcmd/linux32/crashhandler.so"
+
+[ -x "$repo_root/steamcmd/steamcmd.sh" ] || fail "steamcmd/steamcmd.sh must be executable"
+[ -x "$repo_root/steamcmd/linux32/steamcmd" ] || fail "steamcmd/linux32/steamcmd must be executable"
 
 perl -c "$repo_root/gsp_agent.pl" >/dev/null
 bash -n "$repo_root/install.sh" "$repo_root/install_agent_prereqs.sh" "$repo_root/agent_conf.sh" "$repo_root/gsp_agent_run"
+bash -n "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh"
+"$repo_root/tests/validate_steamcmd_bootstrap_payload.sh" >/dev/null
 
 for file in "$repo_root/install.sh" "$repo_root/agent_conf.sh" "$repo_root/Cfg/bash_prefs.cfg.default"; do
 	require_text "$file" "https://git.runlevelsystems.com/GSE/Agent-Linux"
@@ -61,6 +72,8 @@ done
 
 require_text "$repo_root/install.sh" "validate_staged_payload"
 require_text "$repo_root/install.sh" "validate_installed_payload"
+require_text "$repo_root/install.sh" "validate_steamcmd_bootstrap"
+require_text "$repo_root/install.sh" "restore_missing_steamcmd_bootstrap"
 require_text "$repo_root/install.sh" "uninstall_agent"
 require_text "$repo_root/install.sh" "--purge-data"
 require_text "$repo_root/install.sh" "remove_managed_agent_files"
@@ -78,12 +91,17 @@ require_text "$repo_root/gsp_agent.pl" "sub validate_expected_ports"
 require_text "$repo_root/gsp_agent.pl" "sub has_listening_port_named"
 require_text "$repo_root/gsp_agent.pl" 'my $os = `uname -sr 2>/dev/null`;'
 require_text "$repo_root/gsp_agent.pl" "clear_pid_metadata(\$home_id);"
+require_text "$repo_root/gsp_agent.pl" "SteamCMD is unavailable. Expected bundled bootstrap executable"
+require_text "$repo_root/gsp_agent.pl" "SteamCMD bootstrap missing from source payload"
+require_text "$repo_root/gsp_agent_run" "restore_missing_steamcmd_bootstrap"
 
 legacy_linux_repo="$(printf '%s%s' 'GSP-Agent' '-Linux')"
 legacy_github_gsp="$(printf '%s%s%s%s' 'https://github.com/' 'OpenGamePanel/' 'GSP-Agent' '-Linux')"
 legacy_github_ogp="$(printf '%s%s%s%s' 'https://github.com/' 'OpenGamePanel/' 'OGP-Agent' '-Linux')"
 legacy_forge="$(printf '%s%s%s' 'forge.' 'runlevelsystems.com/dev/' 'GSP.git')"
 legacy_branch="$(printf '%s%s' 'Panel' '-unstable')"
+legacy_steamcmd_http="$(printf '%s%s' 'http://media.steampowered.com/client/' 'steamcmd_linux.tar.gz')"
+legacy_steamcmd_download="$(printf '%s%s' '$ua->get($steam' '_client_url')"
 windows_only_regex="$(printf '%s|%s|%s|%s|%s|%s' 'power''shell' 'cyg''path' 'cyg''runsrv' 'ic''acls' 'task''kill' 'cmd\\.exe')"
 
 require_absent_active "$legacy_linux_repo"
@@ -91,6 +109,8 @@ require_absent_active "$legacy_github_gsp"
 require_absent_active "$legacy_github_ogp"
 require_absent_active "$legacy_forge"
 require_absent_active "$legacy_branch"
+require_absent_active "$legacy_steamcmd_http"
+require_absent_active "$legacy_steamcmd_download"
 require_absent_regex_active "$windows_only_regex"
 
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/gse-linux-agent-test.XXXXXX")"

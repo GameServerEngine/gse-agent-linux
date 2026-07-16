@@ -11,6 +11,7 @@ Perl-based Linux execution agent for GameServer Engine (GSE). The agent receives
 - main log: `/home/gameserver/GSP/gsp_agent.log`
 - screen logs: `/home/gameserver/GSP/screenlogs/`
 - server-content runtime: `/home/gameserver/GSP/_gsp_content/`
+- SteamCMD bootstrap: `/home/gameserver/GSP/steamcmd/steamcmd.sh`
 
 Legacy `GSP` script names, default paths, config keys, RPC headers, screen-session prefixes, and Workshop markers are retained only where the Panel or older installs may still expect them.
 
@@ -40,6 +41,14 @@ sudo ./install.sh --uninstall
 ```
 
 `--purge-data` removes the full install directory and should only be used after separately backing up customer data.
+
+## SteamCMD Bootstrap
+
+The Linux agent source includes the normal Linux SteamCMD bootstrap under `steamcmd/` so offline installs and repairs can restore `steamcmd/steamcmd.sh` without downloading SteamCMD during install or agent startup.
+
+Agent startup does not run SteamCMD and does not require internet access. Non-Steam servers work without SteamCMD. Steam installs, Steam updates, and Steam Workshop operations still require a usable `steamcmd/steamcmd.sh`; SteamCMD may self-update and download content when those Steam-specific operations run and internet access is available.
+
+Install, repair, and restart-time update preserve an existing installed `steamcmd/` directory. They restore missing bundled bootstrap files only and do not overwrite SteamCMD runtime state, `steamapps/`, logs, credentials, or self-updated files that already exist.
 
 ## Service Commands
 

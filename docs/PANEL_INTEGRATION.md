@@ -58,7 +58,9 @@ The Linux agent exposes these structured RPCs for the Admin -> Servers per-agent
 
 ## Installer Lifecycle
 
-`install.sh` supports `install`, `repair`, `reconfigure`, and `uninstall`. Install and repair fetch the configured canonical Git repository and branch, validate the staged payload, copy source-owned files, and preserve customer/runtime state. Reconfigure regenerates local config only. Uninstall removes the managed systemd service and known source-owned agent files while preserving customer data by default; `--purge-data` is the explicit destructive path.
+`install.sh` supports `install`, `repair`, `reconfigure`, and `uninstall`. Install and repair fetch the configured canonical Git repository and branch, validate the staged payload, copy source-owned files, and preserve customer/runtime state. The staged and installed payload must include the Linux SteamCMD bootstrap at `steamcmd/steamcmd.sh`; missing bootstrap files are restored into an installed `steamcmd/` directory without overwriting existing SteamCMD runtime state. Reconfigure regenerates local config only. Uninstall removes the managed systemd service and known source-owned agent files while preserving customer data by default; `--purge-data` is the explicit destructive path.
+
+The agent does not run SteamCMD during startup, and non-Steam operations do not require SteamCMD or internet access. Steam-specific installs, updates, version checks, and Workshop operations validate `steamcmd/steamcmd.sh` when invoked and fail with a Steam-specific error if the bootstrap is unavailable.
 
 ## Self-Update And Rollback
 
@@ -89,5 +91,7 @@ The updater preserves host/customer data and local config:
 - `tmp/`
 - `shared/`
 - PID files
+
+Restart-time updates use the same SteamCMD preservation rule as install and repair: restore missing bundled bootstrap files only, preserve existing `steamcmd/` state, and never delete `steamapps/` or downloaded Workshop/content data.
 
 If the updated agent does not listen on its RPC port before the timeout, the updater stops the failed instance, restores the backup, starts the previous agent, and records `rolled_back` or `failed` in `gsp_agent_update_state.json`.

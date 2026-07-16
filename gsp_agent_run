@@ -223,6 +223,52 @@ validate_staged_source() {
 		write_state failed "Staged gsp_agent_run failed syntax validation"
 		return 1
 	}
+	validate_steamcmd_bootstrap "$src" || return 1
+}
+
+validate_steamcmd_bootstrap() {
+	local root_dir="$1"
+	local missing=""
+	for file in \
+		steamcmd/steamcmd.sh \
+		steamcmd/linux32/steamcmd \
+		steamcmd/linux32/steamerrorreporter \
+		steamcmd/linux32/libstdc++.so.6 \
+		steamcmd/linux32/crashhandler.so
+	do
+		[ -s "$root_dir/$file" ] || missing="$missing $file"
+	done
+	if [ -n "$missing" ]; then
+		write_state failed "Staged SteamCMD bootstrap is incomplete:${missing}"
+		return 1
+	fi
+	[ -x "$root_dir/steamcmd/steamcmd.sh" ] || {
+		write_state failed "Staged SteamCMD bootstrap is not executable: steamcmd/steamcmd.sh"
+		return 1
+	}
+	[ -x "$root_dir/steamcmd/linux32/steamcmd" ] || {
+		write_state failed "Staged SteamCMD bootstrap is not executable: steamcmd/linux32/steamcmd"
+		return 1
+	}
+}
+
+restore_missing_steamcmd_bootstrap() {
+	local src="$1"
+	local file
+	validate_steamcmd_bootstrap "$src" || return 1
+	for file in \
+		steamcmd/steamcmd.sh \
+		steamcmd/linux32/steamcmd \
+		steamcmd/linux32/steamerrorreporter \
+		steamcmd/linux32/libstdc++.so.6 \
+		steamcmd/linux32/crashhandler.so
+	do
+		if [ ! -e "$AGENTDIR/$file" ]; then
+			mkdir -p "$(dirname "$AGENTDIR/$file")"
+			cp -p "$src/$file" "$AGENTDIR/$file"
+		fi
+	done
+	chmod +x "$AGENTDIR/steamcmd/steamcmd.sh" "$AGENTDIR/steamcmd/linux32/steamcmd" 2>/dev/null || true
 }
 
 backup_current_agent() {
@@ -303,6 +349,7 @@ copy_staged_source() {
 			--exclude='./*.pid' \
 			-cf - .) | (cd "$AGENTDIR" && tar -xf -) >> "$UPDATE_LOG" 2>&1
 	fi
+	restore_missing_steamcmd_bootstrap "$src"
 }
 
 restore_backup() {

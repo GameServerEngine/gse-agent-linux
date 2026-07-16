@@ -613,14 +613,6 @@ if (!-d SHARED_GAME_TMP_DIR && !mkdir SHARED_GAME_TMP_DIR)
 	exit -1;
 }
 
-if (check_steam_cmd_client() == -1)
-{
-	print "ERROR: You must download and uncompress the new steamcmd package.";
-	print "BE SURE TO INSTALL IT IN " . AGENT_RUN_DIR . "/steamcmd directory,";
-	print "so it can be managed by the agent to install servers.";
-	exit 1;
-}
-
 # create the directory for startup flags
 if (!-e GAME_STARTUP_DIR)
 {
@@ -1178,50 +1170,26 @@ sub check_steam_cmd_client
 		logger "Steam license not accepted, stopping Steam client check.";
 		return 0;
 	}
-	if (!-d STEAMCMD_CLIENT_DIR && !mkdir STEAMCMD_CLIENT_DIR)
+	if (!-d STEAMCMD_CLIENT_DIR)
 	{
-		logger "Could not create " . STEAMCMD_CLIENT_DIR . " directory $!.", 1;
-		exit -1;
+		logger "SteamCMD is unavailable. Expected bundled bootstrap directory "
+		  . STEAMCMD_CLIENT_DIR
+		  . ". Repair or reinstall the Linux agent to restore steamcmd/steamcmd.sh.";
+		return -1;
 	}
 	if (!-w STEAMCMD_CLIENT_DIR)
 	{
 		logger "Steam client dir '"
 		  . STEAMCMD_CLIENT_DIR
-		  . "' not writable. Unable to get Steam client.";
+		  . "' not writable. Unable to run SteamCMD.";
 		return -1;
 	}
 	if (!-f STEAMCMD_CLIENT_BIN)
 	{
-		logger "The Steam client, steamcmd, does not exist yet, installing...";
-		my $steam_client_file = 'steamcmd_linux.tar.gz';
-		my $steam_client_path = Path::Class::File->new(STEAMCMD_CLIENT_DIR, $steam_client_file);
-		my $steam_client_url =
-		  "http://media.steampowered.com/client/" . $steam_client_file;
-		logger "Downloading the Steam client from $steam_client_url to '"
-		  . $steam_client_path . "'.";
-
-		my $ua = LWP::UserAgent->new;
-		$ua->agent('Mozilla/5.0');
-		my $response = $ua->get($steam_client_url, ':content_file' => "$steam_client_path");
-
-		unless ($response->is_success)
-		{
-			logger "Failed to download steam installer from "
-			  . $steam_client_url
-			  . ".", 1;
-			return -1;
-		}
-		if (-f $steam_client_path)
-		{
-			logger "Uncompressing $steam_client_path";
-			if ( uncompress_file_without_decrypt($steam_client_path, STEAMCMD_CLIENT_DIR) != 1 )
-			{
-				unlink($steam_client_path);
-				logger "Unable to uncompress $steam_client_path, the file has been removed.";
-				return -1;
-			}
-			unlink($steam_client_path);
-		}
+		logger "SteamCMD is unavailable. Expected bundled bootstrap executable "
+		  . STEAMCMD_CLIENT_BIN
+		  . ". Repair or reinstall the Linux agent to restore steamcmd/steamcmd.sh. Official manual download: https://media.steampowered.com/client/steamcmd_linux.tar.gz";
+		return -1;
 	}
 	if (!-x STEAMCMD_CLIENT_BIN)
 	{
@@ -3522,6 +3490,11 @@ sub steam_cmd_without_decrypt
 	my ($home_id, $home_path, $mod, $modname, $betaname, $betapwd, $user, $pass, $guard, $exec_folder_path, $exec_path, $precmd, $postcmd, $cfg_os, $filesToLockUnlock, $arch_bits) = @_;
 	my $owner = get_path_owner($home_path);
 
+	if ( check_steam_cmd_client() == -1 )
+	{
+		return 0;
+	}
+
 	if ( check_b4_chdir($home_path, $owner) != 0)
 	{
 		return 0;
@@ -3622,6 +3595,11 @@ sub fetch_steam_version
 	return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
 	my ($appId, $pureOutput) = &decrypt_params(@_);
 
+	if ( check_steam_cmd_client() == -1 )
+	{
+		return "";
+	}
+
 	my $steam_binary = Path::Class::File->new(STEAMCMD_CLIENT_DIR, "steamcmd.sh");
 	my $steam_options = "+login anonymous +app_info_update 1 +app_info_print \"$appId\" +quit";
 	my $grep = $pureOutput != "0" ? "" : '| grep -EA 1000 "^\s+\"branches\"$" | grep -EA 5 "^\s+\"public\"$" | grep -m 1 -EB 10 "^\s+}$" | grep -E "^\s+\"buildid\"\s+" | tr \'[:blank:]"\' \' \' | tr -s \' \' | cut -d\' \' -f3';
@@ -3654,6 +3632,11 @@ sub automatic_steam_update
 		$control_protocol, $control_password, $control_type,
 		$appId, $modname, $betaname, $betapwd, $user, $pass, $guard, $precmd, $postcmd, $cfg_os, $filesToLockUnlock,
 		$startup_cmd, $cpu, $nice, $preStart, $envVars, $game_key, $arch_bits, $console_log) = &decrypt_params(@_);
+
+	if ( check_steam_cmd_client() == -1 )
+	{
+		return 0;
+	}
 
 	# Is the server currently running? if it is, we'll try to start it after updating.
 	my $isServerRunning = is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1 ? 1 : 0;
@@ -5974,6 +5957,13 @@ fi
 "\$GIT_BIN" clone --depth 1 --branch "\$BRANCH" "\$REPO" "\$TMP/repo" >> "\$LOG" 2>&1 || fail "git clone failed"
 SRC="\$TMP/repo/\$SOURCE_REL"
 [ -d "\$SRC" ] || fail "Source component folder missing: \$SRC"
+if [ "$component" = "linux_agent" ]; then
+  for file in steamcmd/steamcmd.sh steamcmd/linux32/steamcmd steamcmd/linux32/steamerrorreporter steamcmd/linux32/libstdc++.so.6 steamcmd/linux32/crashhandler.so; do
+    [ -s "\$SRC/\$file" ] || fail "SteamCMD bootstrap missing from source payload: \$file"
+  done
+  [ -x "\$SRC/steamcmd/steamcmd.sh" ] || fail "SteamCMD bootstrap is not executable: steamcmd/steamcmd.sh"
+  [ -x "\$SRC/steamcmd/linux32/steamcmd" ] || fail "SteamCMD bootstrap is not executable: steamcmd/linux32/steamcmd"
+fi
 case "\$DEST" in /*) ;; *) fail "Destination must be absolute: \$DEST" ;; esac
 mkdir -p "\$DEST" || fail "Cannot create destination: \$DEST"
 ARCHIVE="\$BACKUP_BASE/${component}_\$(date +%Y%m%d_%H%M%S).tar.gz"
@@ -5982,6 +5972,15 @@ if command -v rsync >/dev/null 2>&1; then
   rsync -a --exclude='Cfg/' --exclude='ServerFiles/' --exclude='Schedule/' --exclude='logs/' --exclude='screenlogs/' --exclude='steamcmd/' --exclude='startups/' --exclude='tmp/' --exclude='shared/' --exclude='component_backups/' --exclude='*.pid' "\$SRC"/ "\$DEST"/ >> "\$LOG" 2>&1 || fail "rsync copy failed"
 else
   (cd "\$SRC" && tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./*.pid' -cf - .) | (cd "\$DEST" && tar -xf -) >> "\$LOG" 2>&1 || fail "tar copy failed"
+fi
+if [ "$component" = "linux_agent" ]; then
+  for file in steamcmd/steamcmd.sh steamcmd/linux32/steamcmd steamcmd/linux32/steamerrorreporter steamcmd/linux32/libstdc++.so.6 steamcmd/linux32/crashhandler.so; do
+    if [ ! -e "\$DEST/\$file" ]; then
+      mkdir -p "\$(dirname "\$DEST/\$file")" || fail "Cannot create SteamCMD bootstrap directory"
+      cp -p "\$SRC/\$file" "\$DEST/\$file" || fail "Cannot restore SteamCMD bootstrap file: \$file"
+    fi
+  done
+  chmod +x "\$DEST/steamcmd/steamcmd.sh" "\$DEST/steamcmd/linux32/steamcmd" 2>/dev/null || true
 fi
 if [ -f "\$DEST/gsp_agent.pl" ]; then
   perl -c "\$DEST/gsp_agent.pl" >> "\$LOG" 2>&1 || fail "Updated gsp_agent.pl failed syntax validation"
@@ -6869,6 +6868,10 @@ sub steam_workshop_without_decrypt
 
 	if($download_method eq 'steamcmd')
 	{
+		if ( check_steam_cmd_client() == -1 )
+		{
+			return -1;
+		}
 		my $steam_binary = STEAMCMD_CLIENT_BIN;
 		my $installSteamFile = $screen_id . "_workshop.txt";
 		my $installtxt = Path::Class::File->new(STEAMCMD_CLIENT_DIR, $installSteamFile);

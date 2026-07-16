@@ -1,0 +1,16 @@
+# SteamCMD runtime state generated on installed hosts.
+/steamcmd_linux.tar.gz
+steamcmd/*_install.txt
+steamcmd/*_workshop.txt
+steamcmd/steamcmd_linux.tar.gz
+steamcmd/steamapps/
+steamcmd/appcache/
+steamcmd/config/
+steamcmd/logs/
+steamcmd/package/
+steamcmd/public/
+steamcmd/siteserverui/
+steamcmd/ssfn*
+steamcmd/*.log
+steamcmd/*.dmp
+steamcmd/*.tmp

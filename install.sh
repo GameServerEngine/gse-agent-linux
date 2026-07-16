@@ -126,6 +126,7 @@ validate_staged_payload() {
 	[ -s "$source_dir/install.sh" ] || fail "Source path is missing install.sh: $source_dir"
 	[ -s "$source_dir/install_agent_prereqs.sh" ] || fail "Source path is missing install_agent_prereqs.sh: $source_dir"
 	[ -s "$source_dir/systemd/gsp_agent.service" ] || fail "Source path is missing systemd/gsp_agent.service: $source_dir"
+	validate_steamcmd_bootstrap "$source_dir"
 
 	(cd "$source_dir" && perl -c gsp_agent.pl >/dev/null) || fail "Staged gsp_agent.pl failed Perl syntax validation."
 	bash -n "$source_dir/install.sh" || fail "Staged install.sh failed Bash syntax validation."
@@ -138,11 +139,43 @@ validate_installed_payload() {
 	local install_dir="$1"
 	[ -s "$install_dir/gsp_agent.pl" ] || fail "Installed gsp_agent.pl is missing or empty."
 	[ -s "$install_dir/gsp_agent_run" ] || fail "Installed gsp_agent_run is missing or empty."
+	validate_steamcmd_bootstrap "$install_dir"
 	(cd "$install_dir" && perl -c gsp_agent.pl >/dev/null) || fail "Installed gsp_agent.pl failed Perl syntax validation."
 	bash -n "$install_dir/install.sh" || fail "Installed install.sh failed Bash syntax validation."
 	bash -n "$install_dir/install_agent_prereqs.sh" || fail "Installed install_agent_prereqs.sh failed Bash syntax validation."
 	bash -n "$install_dir/agent_conf.sh" || fail "Installed agent_conf.sh failed Bash syntax validation."
 	bash -n "$install_dir/gsp_agent_run" || fail "Installed gsp_agent_run failed Bash syntax validation."
+}
+
+validate_steamcmd_bootstrap() {
+	local root_dir="$1"
+	[ -s "$root_dir/steamcmd/steamcmd.sh" ] || fail "SteamCMD bootstrap is missing steamcmd/steamcmd.sh: $root_dir"
+	[ -s "$root_dir/steamcmd/linux32/steamcmd" ] || fail "SteamCMD bootstrap is missing steamcmd/linux32/steamcmd: $root_dir"
+	[ -s "$root_dir/steamcmd/linux32/steamerrorreporter" ] || fail "SteamCMD bootstrap is missing steamcmd/linux32/steamerrorreporter: $root_dir"
+	[ -s "$root_dir/steamcmd/linux32/libstdc++.so.6" ] || fail "SteamCMD bootstrap is missing steamcmd/linux32/libstdc++.so.6: $root_dir"
+	[ -s "$root_dir/steamcmd/linux32/crashhandler.so" ] || fail "SteamCMD bootstrap is missing steamcmd/linux32/crashhandler.so: $root_dir"
+	[ -x "$root_dir/steamcmd/steamcmd.sh" ] || fail "SteamCMD bootstrap is not executable: steamcmd/steamcmd.sh"
+	[ -x "$root_dir/steamcmd/linux32/steamcmd" ] || fail "SteamCMD bootstrap is not executable: steamcmd/linux32/steamcmd"
+}
+
+restore_missing_steamcmd_bootstrap() {
+	local source_dir="$1"
+	local install_dir="$2"
+	local file
+	validate_steamcmd_bootstrap "$source_dir"
+	for file in \
+		steamcmd/steamcmd.sh \
+		steamcmd/linux32/steamcmd \
+		steamcmd/linux32/steamerrorreporter \
+		steamcmd/linux32/libstdc++.so.6 \
+		steamcmd/linux32/crashhandler.so
+	do
+		if [ ! -e "$install_dir/$file" ]; then
+			mkdir -p "$(dirname "$install_dir/$file")"
+			cp -p "$source_dir/$file" "$install_dir/$file"
+		fi
+	done
+	chmod +x "$install_dir/steamcmd/steamcmd.sh" "$install_dir/steamcmd/linux32/steamcmd" 2>/dev/null || true
 }
 
 install_service() {
@@ -227,6 +260,7 @@ copy_agent_tree() {
 		--exclude='agent_restart_update_backup.tar.gz' \
 		--exclude='*.pid' \
 		"${source_dir%/}/" "${install_dir}/"
+	restore_missing_steamcmd_bootstrap "$source_dir" "$install_dir"
 }
 
 remove_service() {

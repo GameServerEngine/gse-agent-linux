@@ -55,7 +55,7 @@ sudo ./install.sh --reconfigure
 sudo ./install.sh --uninstall
 ```
 
-`--repair` refreshes agent code from the configured repo and preserves existing config unless reconfiguration is requested. `--reconfigure` regenerates only `Cfg/Config.pm`, `Cfg/Preferences.pm`, and `Cfg/bash_prefs.cfg`.
+`--repair` refreshes agent code from the configured repo and preserves existing config unless reconfiguration is requested. It also restores missing bundled SteamCMD bootstrap files under `steamcmd/` without overwriting an existing SteamCMD runtime. `--reconfigure` regenerates only `Cfg/Config.pm`, `Cfg/Preferences.pm`, and `Cfg/bash_prefs.cfg`.
 
 `--uninstall` removes the managed systemd service and known source-owned agent files. It preserves `Cfg/`, `ServerFiles/`, `Schedule/`, `logs/`, `screenlogs/`, `steamcmd/`, `startups/`, `runtime_status/`, `events/`, `tmp/`, `shared/`, Workshop/content runtime folders, backups, credentials, PID/update state, and customer-created files by default. `--purge-data` removes the entire install directory and should only be used after an operator has confirmed the host contains no customer data that must be retained.
 
@@ -116,9 +116,14 @@ Default runtime folders:
 - `screenlogs/`
 - `runtime_status/`
 - `events/`
+- `steamcmd/`
 - `_gsp_content/hooks/`
 - `_gsp_content/generated/`
 - `_gsp_content/runtime/`
+
+The repository ships the Linux SteamCMD bootstrap in `steamcmd/`, with the runtime executable at `steamcmd/steamcmd.sh`. The installer and restart-time updater validate this bootstrap and restore missing bootstrap files during install or repair. They preserve existing installed SteamCMD state, including self-updated files, `steamapps/`, logs, credentials, cache, and downloaded content.
+
+Agent startup does not run SteamCMD and does not require internet access. Non-Steam game servers can start and operate without SteamCMD. Steam-specific installs, updates, version checks, and Workshop operations call the SteamCMD helper at operation time; those operations fail with a Steam-specific error if `steamcmd/steamcmd.sh` is missing or unusable, and may require internet access for SteamCMD self-update and content downloads.
 
 The `_gsp_content/runtime/server_content.pids` file is reserved for generated server-content hook processes. During stop/restart cleanup, hook watchdog PIDs are stopped before hook application PIDs. The main game server watchdog PID should not be stored in this file.
 
