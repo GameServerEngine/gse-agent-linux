@@ -43,7 +43,11 @@ The Linux agent prepares this runtime layout for generated content hooks:
 
 During stop/restart, hook watchdog PIDs are cleaned up before hook application PIDs. Main game server watchdog PIDs should not be written to `server_content.pids`.
 
-Legacy `_alsoRun.pid` files remain compatibility input only. When present at the game home root or one level below it, the Linux agent imports those PIDs into the server-content cleanup path so stop, restart, and force-stop clean legacy helper processes consistently with the Windows agent.
+Legacy `_alsoRun.pid` files remain compatibility input only. When present at the game home root or one level below it, the Linux agent imports those PIDs into the server-content cleanup path so stop, restart, force-stop, and start preflight clean legacy helper processes consistently with the Windows agent.
+
+The main game startup watchdog is regenerated as `<game_home>/serverStart.sh` on every Start and is launched directly by the named screen session. It records `<game_home>/watchdog.pid`, checks desired state every loop, supervises `game.pid` and optional `bot.pid` independently every 30 seconds, and treats a game exit within 120 seconds of launch as a crash loop: it writes `status.stopped`, terminates managed game/bot process groups, records a concise screen-log event, and exits. Optional bot configuration is read only from `<game_home>/bot.def`. Stop, force-stop, restart, and start preflight share the same Linux hard-stop helper: it writes `status.stopped`, stops the named screen, terminates watchdog, bot, and game PID trees/process groups, classifies TCP and UDP game-port owners, refuses protected or ambiguous owners, and removes stale PID/timestamp files only after verification.
+
+For lifecycle RPCs, `home_path` is the server-ID `management_home`. Linux validates the XML `game_key` with the same safe-directory rules as the Panel, derives `game_root=<management_home>/<game_key>`, and resolves Start executable/run-directory, game logs, environment substitutions, and pre-start command substitutions beneath `game_root`. During the transition it accepts either `<game_key>/...` or game-root-relative run directories, but rejects unsafe keys, absolute paths, traversal, and paths escaping management home. Install/update destinations already supplied as payload paths remain payload paths, while generated install control scripts stay in the agent temp directory.
 
 ## Agent Operations RPCs
 
@@ -52,7 +56,7 @@ The Linux agent exposes these structured RPCs for the Admin -> Servers per-agent
 - `agent_version` returns OS, agent code build version, and install path. The code build version is used even when legacy config files still contain an old `version` value.
 - `agent_resource_snapshot` returns CPU, RAM, disk, load average, OS, code build version, and install path for Panel-side caching.
 - `server_status` keeps Linux-native process/session/port checks and returns shared readiness fields used by the Panel on both agents, including port-validation settings, expected/listening/missing ports, `CPUUsage`, `MemoryUsage`, `ProcessRunning`, `StatusState`, `linux_pid`, and compatibility aliases.
-- `force_stop_server(home_id, server_ip, server_port, home_path)` removes the matching startup flag, marks `FORCE_STOPPING`, kills only tracked PID/session targets and the process owning the assigned game port, verifies session/process/port are stopped, and returns a structured result. It never restarts the game server.
+- `force_stop_server(home_id, server_ip, server_port, home_path)` removes the matching startup flag, writes `status.stopped`, runs the shared hard-stop helper, verifies session/process/port absence, and returns a structured result. Protected or ambiguous port owners are reported as actionable failures instead of being killed. It never restarts the game server.
 - `agent_self_update(payload)` records a pending restart-time update request.
 - `agent_update_status` returns the latest `gsp_agent_update_state.json` content.
 

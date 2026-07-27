@@ -46,6 +46,8 @@ require_file "$repo_root/gsp_agent_run"
 require_file "$repo_root/systemd/gsp_agent.service"
 require_file "$repo_root/Cfg/bash_prefs.cfg.default"
 require_file "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh"
+require_file "$repo_root/tests/validate_watchdog_stop_contract.sh"
+require_file "$repo_root/tests/validate_lifecycle_game_key_contract.sh"
 require_file "$repo_root/steamcmd/steamcmd.sh"
 require_file "$repo_root/steamcmd/linux32/steamcmd"
 require_file "$repo_root/steamcmd/linux32/steamerrorreporter"
@@ -58,7 +60,11 @@ require_file "$repo_root/steamcmd/linux32/crashhandler.so"
 perl -c "$repo_root/gsp_agent.pl" >/dev/null
 bash -n "$repo_root/install.sh" "$repo_root/install_agent_prereqs.sh" "$repo_root/agent_conf.sh" "$repo_root/gsp_agent_run"
 bash -n "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh"
+bash -n "$repo_root/tests/validate_watchdog_stop_contract.sh"
+bash -n "$repo_root/tests/validate_lifecycle_game_key_contract.sh"
 "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh" >/dev/null
+"$repo_root/tests/validate_watchdog_stop_contract.sh" >/dev/null
+"$repo_root/tests/validate_lifecycle_game_key_contract.sh" >/dev/null
 
 for file in "$repo_root/install.sh" "$repo_root/agent_conf.sh" "$repo_root/Cfg/bash_prefs.cfg.default"; do
 	require_text "$file" "https://git.runlevelsystems.com/GSE/Agent-Linux"

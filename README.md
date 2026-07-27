@@ -77,6 +77,7 @@ Generated files:
 
 - [Linux Agent Operations Guide](documentation/agent-guide.md)
 - [Panel Integration](docs/PANEL_INTEGRATION.md)
+- [Game Server Lifecycle Contract](docs/GAME_SERVER_LIFECYCLE_CONTRACT.md)
 - [Agent Activity Events](docs/AGENT_ACTIVITY_EVENTS.md)
 
 ## Related Projects

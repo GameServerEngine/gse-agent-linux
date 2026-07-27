@@ -127,7 +127,11 @@ Agent startup does not run SteamCMD and does not require internet access. Non-St
 
 The `_gsp_content/runtime/server_content.pids` file is reserved for generated server-content hook processes. During stop/restart cleanup, hook watchdog PIDs are stopped before hook application PIDs. The main game server watchdog PID should not be stored in this file.
 
-Legacy `_alsoRun.pid` files are treated as compatibility input. Stop, restart, and force-stop import matching helper PIDs into the server-content cleanup path before escalating to main server PID and port cleanup.
+Legacy `_alsoRun.pid` files are treated as compatibility input. Stop, restart, force-stop, and start preflight import matching helper PIDs into the server-content cleanup path before escalating to main server PID and port cleanup.
+
+Every Start regenerates `<game_home>/serverStart.sh` and launches it directly in the named screen session. The watchdog writes `<game_home>/watchdog.pid`, keeps `game.pid`, `game.launch_ts`, and optional `bot.pid` in the game home, checks every 30 seconds, and exits without starting game or sidecar processes unless `status.running` is the only readable desired-state marker. A game exit within 120 seconds of launch is treated as a crash loop: the watchdog writes `status.stopped`, terminates managed game/bot process groups, records a concise screen-log event, and exits. Optional bot settings are read only from `<game_home>/bot.def`. Home PID cleanup processes `watchdog.pid` before `bot.pid` and `game.pid`, using the shared Linux hard-stop helper.
+
+In lifecycle management, `game_home` is the server-ID management directory. The game payload root is `game_home/<validated XML game_key>`. The Linux agent validates `game_key` as a single safe directory name and rejects empty keys, traversal, slashes, backslashes, drive prefixes, colons, control characters, reserved device names, trailing dots, and any resolved path that would escape the management directory. Game executables, game logs, configs, mods, missions, saves, Workshop payloads, and user content resolve beneath that payload root. Watchdogs, desired-state markers, PID files, bot definitions, Server Content management runtime, and install control scripts stay in the management directory or agent temp/runtime directories.
 
 ## systemd Service
 
@@ -168,6 +172,10 @@ The same `gsp_agent_run` wrapper is used by systemd and by foreground debugging.
 ## Server Status Contract
 
 `server_status` reports the same shared readiness fields expected by the Panel on both Linux and Windows. Linux keeps Linux-native process and port detection, but returns `PortValidationEnabled`, `StartupValidationTimeoutSeconds`, `PortCheckIntervalSeconds`, `ExpectedPorts`, `ListeningPorts`, `MissingPorts`, `CPUUsage`, `MemoryUsage`, `linux_pid`, and compatibility aliases such as `ProcessRunning` and `StatusState`.
+
+Normal stop and force-stop write `<game_home>/status.stopped` before cleanup. A new start first performs the same cleanup while stopped, verifies the named screen, tracked PIDs, and TCP/UDP game-port owners are absent, then writes `<game_home>/status.running` immediately before launching the guarded watchdog.
+
+On agent restart, automatic startup registration is honored only when the management directory still contains a valid `status.running` marker. Missing, stopped, unreadable, or conflicting desired-state markers are treated as stopped and skipped.
 
 ## Restart-Time Updates
 

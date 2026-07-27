@@ -501,9 +501,8 @@ sub record_server_state_transition
 	my $current_status = $status_info->{status} || "UNKNOWN";
 	my $previous_status = $previous->{status} || "";
 	my $now = time();
-	my ($hint_time, $hint) = read_status_hint($home_id);
 	my ($event_type, $severity);
-	if($hint eq "AUTORESTARTING" && !($previous->{autorestart_pending} || 0))
+	if(($status_info->{restart_reason} || "") eq "automatic_restart" && !($previous->{autorestart_pending} || 0))
 	{
 		($event_type, $severity) = ("automatic_restart_started", "warning");
 		$previous->{autorestart_pending} = 1;
@@ -520,7 +519,7 @@ sub record_server_state_transition
 	}
 	elsif($previous_status eq "ONLINE" && $current_status eq "OFFLINE")
 	{
-		($event_type, $severity) = ($hint eq "STOPPING" || $hint eq "STOPPED") ? ("server_stop_confirmed", "info") : ("server_crash_detected", "warning");
+		($event_type, $severity) = ("server_crash_detected", "warning");
 	}
 	elsif($previous_status ne "ONLINE" && $current_status eq "ONLINE")
 	{
@@ -677,6 +676,12 @@ elsif ($no_startups != 1)
 			{
 				logger
 				  "This server ($server_exe on $server_ip : $server_port) is already running (ID: $home_id).";
+				next;
+			}
+			my ($desired_state, $desired_state_reason) = read_desired_state_without_decrypt($home_path);
+			if($desired_state ne "running")
+			{
+				logger "Skipping automatic startup for HOME ID:$home_id because desired state is $desired_state ($desired_state_reason).";
 				next;
 			}
 
@@ -997,7 +1002,6 @@ sub shell_single_quote
 sub create_screen_cmd_loop
 {
 	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file, $home_path, $game_workdir) = @_;
-	my $server_start_bashfile = $screen_id . "_startup_scr.sh";
 
 	$exec_cmd = replace_GSP_Env_Vars($screen_id, "", "", $exec_cmd);
 	$home_path = "." unless(defined($home_path) && $home_path ne "");
@@ -1006,6 +1010,9 @@ sub create_screen_cmd_loop
 	my $quoted_home_path = shell_single_quote($home_path);
 	my $quoted_game_workdir = shell_single_quote($game_workdir);
 	my $quoted_exec_cmd = shell_single_quote($exec_cmd);
+	my $server_start_bashfile = "$home_path/serverStart.sh";
+	my $quoted_watchdog_path = shell_single_quote($server_start_bashfile);
+	my $autorestart_enabled = defined($skipLoop) && $skipLoop ? "0" : "1";
 
 	if(-e $server_start_bashfile){
 		secure_path_without_decrypt('chattr-i', $server_start_bashfile);
@@ -1013,64 +1020,183 @@ sub create_screen_cmd_loop
 
 	open (SERV_START_SCRIPT, '>', $server_start_bashfile);
 
-	my $watchdog_script = "#!/bin/bash\n"
-	. "set +e\n"
-	. "HOME_PATH=$quoted_home_path\n"
-	. "GAME_WORKDIR=$quoted_game_workdir\n"
-	. "GAME_COMMAND=$quoted_exec_cmd\n"
-	. "cd \"\$HOME_PATH\" || exit 1\n"
-	. "rm -f _alsoRun.bat _alsoRun.pid\n";
+	my @watchdog_lines = (
+		'#!/bin/bash',
+		'set +e',
+		"HOME_PATH=$quoted_home_path",
+		"GAME_WORKDIR=$quoted_game_workdir",
+		"GAME_COMMAND=$quoted_exec_cmd",
+		"AUTORESTART_ENABLED=$autorestart_enabled",
+		'cd "$HOME_PATH" || exit 1',
+		'umask 077',
+		'echo "$$" > "$HOME_PATH/watchdog.pid"',
+		'',
+		'log_event() {',
+		'    printf "%s %s\n" "$(date -Is 2>/dev/null || date)" "$*" >&2',
+		'}',
+		'',
+		'is_running_state() {',
+		'    [ -r "$HOME_PATH/status.running" ] && [ ! -e "$HOME_PATH/status.stopped" ]',
+		'}',
+		'',
+		'read_number_file() {',
+		'    value=""',
+		'    [ -r "$1" ] && read -r value < "$1"',
+		'    case "$value" in ""|*[!0-9]*) return 1 ;; esac',
+		'    printf "%s\n" "$value"',
+		'}',
+		'',
+		'publish_stopped_state() {',
+		'    tmp="$HOME_PATH/status.stopped.$$.$(date +%s).tmp"',
+		'    if printf "%s,stopped\n" "$(date +%s)" > "$tmp"; then',
+		'        chmod 0644 "$tmp"',
+		'        mv -f "$tmp" "$HOME_PATH/status.stopped"',
+		'    fi',
+		'    rm -f "$HOME_PATH/status.running"',
+		'}',
+		'',
+		'pid_alive() {',
+		'    case "$1" in ""|*[!0-9]*) return 1 ;; esac',
+		'    kill -0 "$1" >/dev/null 2>&1',
+		'}',
+		'',
+		'pid_pgid() {',
+		'    pid="$1"',
+		'    [ -r "/proc/$pid/stat" ] || return 1',
+		'    stat_line="$(cat "/proc/$pid/stat" 2>/dev/null)"',
+		'    stat_tail="${stat_line##*) }"',
+		'    set -- $stat_tail',
+		'    [ "$#" -ge 3 ] || return 1',
+		'    printf "%s\n" "$3"',
+		'}',
+		'',
+		'terminate_pid_group() {',
+		'    pid="$1"',
+		'    case "$pid" in ""|*[!0-9]*) return 0 ;; esac',
+		'    pgid="$(pid_pgid "$pid" 2>/dev/null)"',
+		'    [ -n "$pgid" ] || pgid="$pid"',
+		'    if [ "$pgid" = "$pid" ]; then',
+		'        kill -TERM -- "-$pgid" >/dev/null 2>&1',
+		'    else',
+		'        kill -TERM "$pid" >/dev/null 2>&1',
+		'    fi',
+		'    sleep 2',
+		'    if [ "$pgid" = "$pid" ]; then',
+		'        kill -KILL -- "-$pgid" >/dev/null 2>&1',
+		'    fi',
+		'    pid_alive "$pid" && kill -KILL "$pid" >/dev/null 2>&1',
+		'}',
+		'',
+		'cleanup_managed_processes() {',
+		'    terminate_pid_group "$(read_number_file "$HOME_PATH/bot.pid")"',
+		'    terminate_pid_group "$(read_number_file "$HOME_PATH/game.pid")"',
+		'    rm -f "$HOME_PATH/bot.pid" "$HOME_PATH/game.pid" "$HOME_PATH/game.launch_ts"',
+		'}',
+		'',
+		'load_bot_definition() {',
+		'    BOT_WORKDIR=""',
+		'    BOT_EXE=""',
+		'    BOT_COMMAND=""',
+		'    BOT_ARGS=""',
+		'    [ -r "$HOME_PATH/bot.def" ] || return 0',
+		'    while IFS="=" read -r key value; do',
+		'        case "$key" in',
+		'            workdir) BOT_WORKDIR="$value" ;;',
+		'            executable) BOT_EXE="$value" ;;',
+		'            command) BOT_COMMAND="$value" ;;',
+		'            arguments) BOT_ARGS="$value" ;;',
+		'        esac',
+		'    done < "$HOME_PATH/bot.def"',
+		'}',
+		'',
+		'launch_game() {',
+		'    is_running_state || exit 0',
+		'    cd "$GAME_WORKDIR" || exit 1',
+		'    if command -v setsid >/dev/null 2>&1; then',
+		'        setsid bash -lc "exec $GAME_COMMAND" >/dev/null 2>&1 &',
+		'    else',
+		'        bash -lc "exec $GAME_COMMAND" >/dev/null 2>&1 &',
+		'    fi',
+		'    game_pid="$!"',
+		'    printf "%s\n" "$game_pid" > "$HOME_PATH/game.pid"',
+		'    date +%s > "$HOME_PATH/game.launch_ts"',
+		'    cd "$HOME_PATH" || exit 1',
+		'    log_event "launched game pid=$game_pid"',
+		'}',
+		'',
+		'launch_bot() {',
+		'    is_running_state || exit 0',
+		'    [ -n "$BOT_WORKDIR" ] || return 0',
+		'    [ -n "$BOT_COMMAND" ] || [ -n "$BOT_EXE" ] || return 0',
+		'    cd "$BOT_WORKDIR" || return 0',
+		'    if [ -n "$BOT_COMMAND" ]; then',
+		'        if command -v setsid >/dev/null 2>&1; then',
+		'            setsid bash -lc "exec $BOT_COMMAND" >/dev/null 2>&1 &',
+		'        else',
+		'            bash -lc "exec $BOT_COMMAND" >/dev/null 2>&1 &',
+		'        fi',
+		'    else',
+		'        if command -v setsid >/dev/null 2>&1; then',
+		'            setsid bash -lc \'exec "$1" $2\' bot-launch "$BOT_EXE" "$BOT_ARGS" >/dev/null 2>&1 &',
+		'        else',
+		'            bash -lc \'exec "$1" $2\' bot-launch "$BOT_EXE" "$BOT_ARGS" >/dev/null 2>&1 &',
+		'        fi',
+		'    fi',
+		'    bot_pid="$!"',
+		'    printf "%s\n" "$bot_pid" > "$HOME_PATH/bot.pid"',
+		'    cd "$HOME_PATH" || exit 1',
+		'    log_event "launched bot pid=$bot_pid"',
+		'}',
+		'',
+		'is_running_state || exit 0',
+		'',
+		'while is_running_state; do',
+		'    game_pid="$(read_number_file "$HOME_PATH/game.pid")"',
+		'    if ! pid_alive "$game_pid"; then',
+		'        previous_launch="$(read_number_file "$HOME_PATH/game.launch_ts")"',
+		'        now="$(date +%s)"',
+		'        if [ -n "$previous_launch" ] && [ "$previous_launch" -gt 0 ] && [ $((now - previous_launch)) -lt 120 ]; then',
+		'            log_event "game exited within 120 seconds; stopping managed lifecycle"',
+		'            publish_stopped_state',
+		'            cleanup_managed_processes',
+		'            exit 0',
+		'        fi',
+		'        if [ "$AUTORESTART_ENABLED" != "1" ] && [ -n "$previous_launch" ]; then',
+		'            log_event "game exited and autorestart is disabled; stopping managed lifecycle"',
+		'            publish_stopped_state',
+		'            cleanup_managed_processes',
+		'            exit 0',
+		'        fi',
+		'        rm -f "$HOME_PATH/game.pid"',
+		'        launch_game',
+		'    fi',
+		'',
+		'    load_bot_definition',
+		'    bot_pid="$(read_number_file "$HOME_PATH/bot.pid")"',
+		'    if [ -n "$BOT_WORKDIR" ] && { [ -n "$BOT_COMMAND" ] || [ -n "$BOT_EXE" ]; } && ! pid_alive "$bot_pid"; then',
+		'        rm -f "$HOME_PATH/bot.pid"',
+		'        launch_bot',
+		'    fi',
+		'',
+		'    sleep 30',
+		'done',
+		'',
+		'exit 0'
+	);
+	my $watchdog_script = join("\n", @watchdog_lines) . "\n";
 
 	if(defined $envVars && $envVars ne ""){
-		$watchdog_script .= $envVars;
+		$watchdog_script =~ s/\ncd "\$HOME_PATH" \|\| exit 1\n/\n$envVars\ncd "\$HOME_PATH" || exit 1\n/;
 	}
-
-	$watchdog_script .= "BOT_WORKDIR=\"\"\n"
-	. "BOT_EXE=\"\"\n"
-	. "BOT_ARGS=\"\"\n"
-	. "if [ -f _alsoRun.cmd ]; then\n"
-	. "    while IFS='=' read -r key value; do\n"
-	. "        case \"\$key\" in\n"
-	. "            workdir) BOT_WORKDIR=\"\$value\" ;;\n"
-	. "            executable) BOT_EXE=\"\$value\" ;;\n"
-	. "            arguments) BOT_ARGS=\"\$value\" ;;\n"
-	. "        esac\n"
-	. "    done < _alsoRun.cmd\n"
-	. "fi\n"
-	. "while true; do\n"
-	. "    GAME_RUNNING=0\n"
-	. "    GAME_PID=\"\"\n"
-	. "    if [ -f game.pid ]; then GAME_PID=\$(cat game.pid 2>/dev/null); fi\n"
-	. "    if echo \"\$GAME_PID\" | grep -Eq '^[0-9]+$' && kill -0 \"\$GAME_PID\" >/dev/null 2>&1; then GAME_RUNNING=1; fi\n"
-	. "    if [ \"\$GAME_RUNNING\" = \"0\" ]; then\n"
-	. "        rm -f game.pid\n"
-	. "        ( cd \"\$GAME_WORKDIR\" && exec bash -lc \"exec \$GAME_COMMAND\" ) >/dev/null 2>&1 &\n"
-	. "        echo \$! > \"\$HOME_PATH/game.pid\"\n"
-	. "        sleep 5\n"
-	. "    fi\n"
-	. "    if [ -n \"\$BOT_WORKDIR\" ] && [ -n \"\$BOT_EXE\" ]; then\n"
-	. "        BOT_RUNNING=0\n"
-	. "        BOT_PID=\"\"\n"
-	. "        if [ -f bot.pid ]; then BOT_PID=\$(cat bot.pid 2>/dev/null); fi\n"
-	. "        if echo \"\$BOT_PID\" | grep -Eq '^[0-9]+$' && kill -0 \"\$BOT_PID\" >/dev/null 2>&1; then BOT_RUNNING=1; fi\n"
-	. "        if [ \"\$BOT_RUNNING\" = \"0\" ]; then\n"
-	. "            rm -f bot.pid\n"
-	. "            ( cd \"\$BOT_WORKDIR\" && exec \"\$BOT_EXE\" \$BOT_ARGS ) >/dev/null 2>&1 &\n"
-	. "            echo \$! > \"\$HOME_PATH/bot.pid\"\n"
-	. "            sleep 3\n"
-	. "        fi\n"
-	. "    fi\n"
-	. "    sleep 60\n"
-	. "done\n";
 
 	print SERV_START_SCRIPT $watchdog_script;
 	close (SERV_START_SCRIPT);
 
-	my $readOnlyOwnerCmd = "chmod -Rf og-r '$server_start_bashfile'";
+	chmod 0750, $server_start_bashfile;
+	my $readOnlyOwnerCmd = "chmod -Rf og-r " . $quoted_watchdog_path;
 	sudo_exec_without_decrypt($readOnlyOwnerCmd);
-	secure_path_without_decrypt('chattr+i', $server_start_bashfile);
 
-	my $screen_exec_script = "bash " . $server_start_bashfile;
+	my $screen_exec_script = "bash " . $quoted_watchdog_path;
 
 	return
 	  sprintf('export WINEDEBUG="fixme-all" && export DISPLAY=:1 && screen -d -m -t "%1$s" -c ' . SCREENRC_FILE . ' -S %1$s %2$s',
@@ -1282,6 +1408,81 @@ sub read_status_hint
 	return ($timestamp, $state);
 }
 
+# Return the two authoritative desired-state marker paths for one management home.
+sub desired_state_paths_without_decrypt
+{
+	my ($home_path) = @_;
+	return ("", "") unless(defined($home_path) && $home_path ne "");
+	return ("$home_path/status.running", "$home_path/status.stopped");
+}
+
+# Atomically publish exactly one desired lifecycle state marker in management_home.
+sub write_desired_state_without_decrypt
+{
+	my ($home_path, $state) = @_;
+	return 0 unless(defined($home_path) && -d $home_path);
+	return 0 unless(defined($state) && $state =~ /^(running|stopped)$/);
+	my ($running_file, $stopped_file) = desired_state_paths_without_decrypt($home_path);
+	my $target_file = $state eq "running" ? $running_file : $stopped_file;
+	my $opposite_file = $state eq "running" ? $stopped_file : $running_file;
+	my $tmp_file = "$target_file.$$." . time() . ".tmp";
+
+	unlink($opposite_file) if(-e $opposite_file);
+	if(open(my $STATE, '>', $tmp_file))
+	{
+		print $STATE time() . ",$state\n";
+		close($STATE);
+		chmod 0644, $tmp_file;
+		return 0 unless(rename($tmp_file, $target_file));
+		unlink($opposite_file) if(-e $opposite_file);
+		return 1;
+	}
+	return 0;
+}
+
+# Read desired state safely. Any missing, duplicate, conflicting, or unreadable marker fails safe as stopped.
+sub read_desired_state_without_decrypt
+{
+	my ($home_path) = @_;
+	my ($running_file, $stopped_file) = desired_state_paths_without_decrypt($home_path);
+	return ("stopped", "invalid_home") if($running_file eq "" || $stopped_file eq "");
+	my $running_exists = -e $running_file ? 1 : 0;
+	my $stopped_exists = -e $stopped_file ? 1 : 0;
+	return ("stopped", "missing") if(!$running_exists && !$stopped_exists);
+	return ("stopped", "conflicting") if($running_exists && $stopped_exists);
+
+	my $state_file = $running_exists ? $running_file : $stopped_file;
+	my $STATE;
+	if(!open($STATE, '<', $state_file))
+	{
+		return ("stopped", "unreadable");
+	}
+	my $line = <$STATE>;
+	close($STATE);
+	return ("stopped", "invalid") unless(defined($line));
+	chomp($line);
+	my $expected_state = $running_exists ? "running" : "stopped";
+	return ("stopped", "invalid") unless($line =~ /^([0-9]+),(running|stopped)$/ && $2 eq $expected_state);
+	return ($expected_state, "ok");
+}
+
+# Remove lifecycle PID/timestamp metadata after verification has proven the home is inactive.
+sub clear_lifecycle_runtime_files_without_decrypt
+{
+	my ($home_id, $home_path) = @_;
+	clear_pid_metadata($home_id);
+	if(defined($home_path) && $home_path ne "")
+	{
+		foreach my $name ("watchdog.pid", "bot.pid", "game.pid", "game.launch_ts")
+		{
+			my $path = "$home_path/$name";
+			unlink($path) if(-e $path);
+		}
+	}
+	my $hint_file = get_status_hint_path($home_id);
+	unlink($hint_file) if(-e $hint_file);
+}
+
 sub get_pid_metadata_path
 {
 	my ($home_id) = @_;
@@ -1341,6 +1542,270 @@ sub is_pid_alive_without_decrypt
 	return kill(0, $pid) ? 1 : 0;
 }
 
+sub read_proc_text_without_decrypt
+{
+	my ($path) = @_;
+	return "" unless(defined($path) && -r $path);
+	open(my $PROC, '<', $path) or return "";
+	local $/;
+	my $text = <$PROC>;
+	close($PROC);
+	return defined($text) ? $text : "";
+}
+
+sub proc_cmdline_without_decrypt
+{
+	my ($pid) = @_;
+	my $cmdline = read_proc_text_without_decrypt("/proc/$pid/cmdline");
+	$cmdline =~ s/\0/ /g;
+	$cmdline =~ s/\s+$//;
+	return $cmdline;
+}
+
+sub proc_comm_without_decrypt
+{
+	my ($pid) = @_;
+	my $comm = read_proc_text_without_decrypt("/proc/$pid/comm");
+	chomp($comm);
+	return $comm;
+}
+
+sub proc_parent_pid_without_decrypt
+{
+	my ($pid) = @_;
+	my $status = read_proc_text_without_decrypt("/proc/$pid/status");
+	return $1 if($status =~ /^PPid:\s+([0-9]+)/m);
+	return "";
+}
+
+sub process_lineage_contains_without_decrypt
+{
+	my ($pid, $ancestor) = @_;
+	return 0 unless(defined($pid) && $pid =~ /^\d+$/ && defined($ancestor) && $ancestor =~ /^\d+$/);
+	my %seen;
+	while($pid =~ /^\d+$/ && $pid > 1 && !$seen{$pid})
+	{
+		return 1 if($pid == $ancestor);
+		$seen{$pid} = 1;
+		$pid = proc_parent_pid_without_decrypt($pid);
+	}
+	return 0;
+}
+
+sub current_agent_protected_pids_without_decrypt
+{
+	my %protected = ( 0 => 1, 1 => 1, $$ => 1 );
+	my $pid = $$;
+	my %seen;
+	while($pid =~ /^\d+$/ && $pid > 1 && !$seen{$pid})
+	{
+		$protected{$pid} = 1;
+		$seen{$pid} = 1;
+		$pid = proc_parent_pid_without_decrypt($pid);
+	}
+	return \%protected;
+}
+
+sub process_is_kernel_thread_without_decrypt
+{
+	my ($pid) = @_;
+	return 0 unless(defined($pid) && $pid =~ /^\d+$/);
+	return 0 unless(proc_cmdline_without_decrypt($pid) eq "");
+	return proc_parent_pid_without_decrypt($pid) eq "2" ? 1 : 0;
+}
+
+sub process_is_protected_without_decrypt
+{
+	my ($pid) = @_;
+	return 1 unless(defined($pid) && $pid =~ /^\d+$/);
+	return 1 if($pid <= 1);
+	my $protected = current_agent_protected_pids_without_decrypt();
+	return 1 if($protected->{$pid});
+	return 1 if(process_lineage_contains_without_decrypt($pid, $$));
+	return 1 if(process_is_kernel_thread_without_decrypt($pid));
+	my $comm = proc_comm_without_decrypt($pid);
+	my $cmdline = proc_cmdline_without_decrypt($pid);
+	return 1 if($comm =~ /^(systemd|init|sshd|ssh|NetworkManager|systemd-networkd|systemd-resolved|dbus-daemon|sudo|su)$/);
+	return 1 if($cmdline =~ /\b(?:gsp_agent\.pl|gsp_agent_run|systemctl|apt|apt-get|dpkg|sshd|NetworkManager|systemd-networkd|systemd-resolved)\b/);
+	return 0;
+}
+
+sub path_is_under_without_decrypt
+{
+	my ($path, $root) = @_;
+	return 0 unless(defined($path) && defined($root) && $path ne "" && $root ne "");
+	my $abs_root = Cwd::abs_path($root);
+	return 0 unless(defined($abs_root) && $abs_root ne "");
+	my $abs_path = Cwd::abs_path($path);
+	return 0 unless(defined($abs_path) && $abs_path ne "");
+	return 1 if($abs_path eq $abs_root);
+	return index($abs_path, "$abs_root/") == 0 ? 1 : 0;
+}
+
+# Normalize a Linux agent path for contract checks without requiring the target to exist.
+sub normalize_agent_path_without_decrypt
+{
+	my ($path) = @_;
+	return "" unless(defined($path));
+	$path =~ s/\\/\//g;
+	$path =~ s/^\s+|\s+$//g;
+	$path =~ s#/+#/#g;
+	$path =~ s#/$## if($path ne "/");
+	return $path;
+}
+
+# Validate XML game_key as the single safe directory component used for game_root.
+sub validate_game_key_without_decrypt
+{
+	my ($game_key) = @_;
+	return (0, "Game key is empty or contains surrounding whitespace.") unless(defined($game_key) && $game_key ne "" && $game_key eq normalize_agent_path_without_decrypt($game_key));
+	return (0, "Game key contains a control character.") if($game_key =~ /[\x00-\x1F\x7F]/);
+	return (0, "Game key must be a single directory name, not a path.") if($game_key =~ m{[\\/]});
+	return (0, "Game key must not contain a drive prefix.") if($game_key =~ /^[A-Za-z]:/ || index($game_key, ":") >= 0);
+	return (0, "Game key must not contain traversal segments.") if($game_key eq "." || $game_key eq ".." || index($game_key, "..") >= 0);
+	return (0, "Game key contains characters that are not safe for a directory name.") unless($game_key =~ /^[A-Za-z0-9._-]+$/);
+	return (0, "Game key must not end with a dot.") if(substr($game_key, -1) eq ".");
+	my ($name_part) = split(/\./, uc($game_key), 2);
+	my %reserved = map { $_ => 1 } qw(CON PRN AUX NUL CONIN$ CONOUT$);
+	for(my $i = 1; $i <= 9; $i++)
+	{
+		$reserved{"COM$i"} = 1;
+		$reserved{"LPT$i"} = 1;
+	}
+	return (0, "Game key uses a reserved device name.") if($reserved{$name_part});
+	return (1, "");
+}
+
+# Return true when candidate is management_home itself or a descendant.
+sub normalized_path_is_at_or_under_without_decrypt
+{
+	my ($candidate, $root) = @_;
+	$candidate = normalize_agent_path_without_decrypt($candidate);
+	$root = normalize_agent_path_without_decrypt($root);
+	return 0 if($candidate eq "" || $root eq "");
+	return 1 if($candidate eq $root);
+	return index($candidate, "$root/") == 0 ? 1 : 0;
+}
+
+# Derive game_root as management_home/<validated game_key> and prove it stays inside management_home.
+sub resolve_game_root_without_decrypt
+{
+	my ($management_home, $game_key) = @_;
+	$management_home = normalize_agent_path_without_decrypt($management_home);
+	return (0, "", "Management home is empty.") if($management_home eq "");
+	my ($valid_key, $key_error) = validate_game_key_without_decrypt($game_key);
+	return (0, "", $key_error) unless($valid_key);
+	my $game_root = normalize_agent_path_without_decrypt("$management_home/$game_key");
+	if(!normalized_path_is_at_or_under_without_decrypt($game_root, $management_home) || $game_root eq $management_home)
+	{
+		return (0, "", "Resolved game root escapes the management home.");
+	}
+	return (1, $game_root, "");
+}
+
+# Resolve Start run directories under game_root while accepting Panel's transitional game_key-prefixed run_dir.
+sub resolve_game_payload_path_without_decrypt
+{
+	my ($management_home, $game_key, $relative_path) = @_;
+	my ($ok, $game_root, $error) = resolve_game_root_without_decrypt($management_home, $game_key);
+	return (0, "", $error) unless($ok);
+	$relative_path = "" unless(defined($relative_path));
+	$relative_path = normalize_agent_path_without_decrypt($relative_path);
+	return (0, "", "Payload path must be relative.") if($relative_path =~ m{^/} || $relative_path =~ /^[A-Za-z]:/);
+	return (0, "", "Payload path contains a control character.") if($relative_path =~ /[\x00-\x1F\x7F]/);
+	foreach my $segment (split(m{/+}, $relative_path))
+	{
+		next if($segment eq "");
+		return (0, "", "Payload path contains traversal.") if($segment eq "." || $segment eq "..");
+	}
+	return (1, $game_root, "") if($relative_path eq "" || $relative_path eq ".");
+
+	my $panel_prefixed_path = normalize_agent_path_without_decrypt("$management_home/$relative_path");
+	return (1, $panel_prefixed_path, "") if(normalized_path_is_at_or_under_without_decrypt($panel_prefixed_path, $game_root));
+
+	my $game_relative_path = normalize_agent_path_without_decrypt("$game_root/$relative_path");
+	return (1, $game_relative_path, "") if(normalized_path_is_at_or_under_without_decrypt($game_relative_path, $game_root));
+	return (0, "", "Resolved payload path escapes game root.");
+}
+
+sub process_associated_with_home_without_decrypt
+{
+	my ($pid, $home_path) = @_;
+	return 0 unless(defined($home_path) && $home_path ne "" && defined($pid) && $pid =~ /^\d+$/);
+	my $abs_home = Cwd::abs_path($home_path);
+	return 0 unless(defined($abs_home) && $abs_home ne "");
+	foreach my $link ("cwd", "exe")
+	{
+		my $target = readlink("/proc/$pid/$link");
+		return 1 if(defined($target) && path_is_under_without_decrypt($target, $abs_home));
+	}
+	my $cmdline = proc_cmdline_without_decrypt($pid);
+	return 1 if($cmdline ne "" && index($cmdline, $abs_home) >= 0);
+	return 0;
+}
+
+sub child_pids_without_decrypt
+{
+	my ($parent_pid) = @_;
+	my @children = ();
+	return @children unless(defined($parent_pid) && $parent_pid =~ /^\d+$/);
+	opendir(my $PROC, "/proc") or return @children;
+	while(my $entry = readdir($PROC))
+	{
+		next unless($entry =~ /^\d+$/);
+		my $ppid = proc_parent_pid_without_decrypt($entry);
+		push(@children, $entry) if(defined($ppid) && $ppid eq $parent_pid);
+	}
+	closedir($PROC);
+	return @children;
+}
+
+sub process_tree_pids_without_decrypt
+{
+	my ($root_pid) = @_;
+	my @result = ();
+	my @queue = ($root_pid);
+	my %seen;
+	while(@queue)
+	{
+		my $pid = shift(@queue);
+		next unless(defined($pid) && $pid =~ /^\d+$/);
+		next if($seen{$pid});
+		$seen{$pid} = 1;
+		push(@result, $pid);
+		push(@queue, child_pids_without_decrypt($pid));
+	}
+	return @result;
+}
+
+# Read the Linux process-group ID from /proc so cleanup can target managed groups.
+sub proc_process_group_id_without_decrypt
+{
+	my ($pid) = @_;
+	return "" unless(defined($pid) && $pid =~ /^\d+$/);
+	my $stat = read_proc_text_without_decrypt("/proc/$pid/stat");
+	return "" unless($stat =~ /\)\s+(.+)$/);
+	my @fields = split(/\s+/, $1);
+	return "" unless(@fields >= 3 && $fields[2] =~ /^\d+$/);
+	return $fields[2];
+}
+
+# Return all live PIDs that currently belong to one Linux process group.
+sub process_group_pids_without_decrypt
+{
+	my ($process_group_id) = @_;
+	my @group_pids = ();
+	return @group_pids unless(defined($process_group_id) && $process_group_id =~ /^\d+$/);
+	opendir(my $PROC, "/proc") or return @group_pids;
+	while(my $entry = readdir($PROC))
+	{
+		next unless($entry =~ /^\d+$/);
+		push(@group_pids, $entry) if(proc_process_group_id_without_decrypt($entry) eq $process_group_id);
+	}
+	closedir($PROC);
+	return @group_pids;
+}
+
 sub kill_pid_with_escalation_without_decrypt
 {
 	my ($pid, $as_user) = @_;
@@ -1355,37 +1820,54 @@ sub kill_pid_with_escalation_without_decrypt
 	return $cnt == -1 ? 0 : 1;
 }
 
-sub find_process_pid_by_port_without_decrypt
+sub find_process_pids_by_port_without_decrypt
 {
 	my ($port, $protocol) = @_;
-	return "" unless(defined($port) && $port =~ /^\d+$/ && $port > 0 && $port <= 65535);
+	return () unless(defined($port) && $port =~ /^\d+$/ && $port > 0 && $port <= 65535);
 	$protocol = "any" unless(defined($protocol) && $protocol =~ /^(tcp|udp|any)$/i);
 	$protocol = lc($protocol);
 	my @commands = ();
 	if($protocol eq "tcp" || $protocol eq "any")
 	{
-		push(@commands, "lsof -nP -t -iTCP:$port -sTCP:LISTEN 2>/dev/null | head -1");
-		push(@commands, "ss -lntp '( sport = :$port )' 2>/dev/null | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | head -1");
+		push(@commands, "lsof -nP -t -iTCP:$port -sTCP:LISTEN 2>/dev/null");
+		push(@commands, "ss -lntp '( sport = :$port )' 2>/dev/null");
 	}
 	if($protocol eq "udp" || $protocol eq "any")
 	{
-		push(@commands, "lsof -nP -t -iUDP:$port 2>/dev/null | head -1");
-		push(@commands, "ss -lnup '( sport = :$port )' 2>/dev/null | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | head -1");
+		push(@commands, "lsof -nP -t -iUDP:$port 2>/dev/null");
+		push(@commands, "ss -lnup '( sport = :$port )' 2>/dev/null");
 	}
+	my %pids = ();
 	foreach my $command (@commands)
 	{
-		my $pid = `$command`;
-		chomp($pid);
-		return $pid if($pid =~ /^\d+$/);
+		my $out = `$command`;
+		next unless(defined($out) && $out ne "");
+		while($out =~ /\bpid=([0-9]+)\b/g)
+		{
+			$pids{$1} = 1 if($1 > 0);
+		}
+		foreach my $line (split(/\r?\n/, $out))
+		{
+			$line =~ s/^\s+|\s+$//g;
+			$pids{$line} = 1 if($line =~ /^[0-9]+$/ && $line > 0);
+		}
 	}
-	return "";
+	return sort { $a <=> $b } keys %pids;
 }
 
-sub kill_home_pid_files_without_decrypt
+sub find_process_pid_by_port_without_decrypt
 {
-	my ($home_path, $as_user) = @_;
-	return unless(defined($home_path) && $home_path ne "");
-	foreach my $pid_name ("bot.pid", "game.pid")
+	my ($port, $protocol) = @_;
+	my @pids = find_process_pids_by_port_without_decrypt($port, $protocol);
+	return @pids ? $pids[0] : "";
+}
+
+sub read_home_pid_targets_without_decrypt
+{
+	my ($home_path) = @_;
+	my @targets = ();
+	return @targets unless(defined($home_path) && $home_path ne "");
+	foreach my $pid_name ("watchdog.pid", "bot.pid", "game.pid")
 	{
 		my $pid_file = "$home_path/$pid_name";
 		if(open(my $PIDFILE, '<', $pid_file))
@@ -1393,35 +1875,266 @@ sub kill_home_pid_files_without_decrypt
 			while(my $pid = <$PIDFILE>)
 			{
 				chomp($pid);
-				next unless($pid =~ /^\d+$/);
-				logger "Attempting forced stop for $pid_name PID $pid.";
-				kill_pid_with_escalation_without_decrypt($pid, $as_user);
+				push(@targets, { pid => $pid, source => $pid_name }) if($pid =~ /^\d+$/);
 			}
 			close($PIDFILE);
 		}
-		unlink($pid_file) if(-e $pid_file);
+	}
+	return @targets;
+}
+
+sub kill_pid_tree_with_escalation_without_decrypt
+{
+	my ($pid, $as_user, $home_path, $source) = @_;
+	my %result = ( success => 1, killed => [], remaining => [], failure => "" );
+	return \%result unless(defined($pid) && $pid =~ /^\d+$/);
+	my $root_is_alive = is_pid_alive_without_decrypt($pid);
+	my $process_group_id = $root_is_alive ? proc_process_group_id_without_decrypt($pid) : $pid;
+	my @group_pids = $process_group_id eq $pid ? process_group_pids_without_decrypt($process_group_id) : ();
+	return \%result unless($root_is_alive || @group_pids);
+	if($root_is_alive && process_is_protected_without_decrypt($pid))
+	{
+		$result{success} = 0;
+		$result{failure} = "protected PID $pid from $source";
+		return \%result;
+	}
+	my $pid_is_home_associated = $root_is_alive ? process_associated_with_home_without_decrypt($pid, $home_path) : 0;
+	my $group_is_home_associated = 0;
+	foreach my $group_pid (@group_pids)
+	{
+		if(process_associated_with_home_without_decrypt($group_pid, $home_path))
+		{
+			$group_is_home_associated = 1;
+			last;
+		}
+	}
+	if(defined($home_path) && $home_path ne "" && $source ne "screen_session" && !$pid_is_home_associated && !$group_is_home_associated)
+	{
+		$result{success} = 0;
+		$result{failure} = "ambiguous PID $pid from $source is not associated with $home_path";
+		return \%result;
+	}
+	my @tree = $root_is_alive ? reverse(process_tree_pids_without_decrypt($pid)) : ();
+	my %candidate;
+	foreach my $target_pid (@tree, @group_pids)
+	{
+		$candidate{$target_pid} = 1 if(defined($target_pid) && $target_pid =~ /^\d+$/);
+	}
+	my %seen;
+	foreach my $target_pid (sort { $b <=> $a } keys %candidate)
+	{
+		next if($seen{$target_pid});
+		$seen{$target_pid} = 1;
+		next unless(is_pid_alive_without_decrypt($target_pid));
+		if(process_is_protected_without_decrypt($target_pid))
+		{
+			$result{success} = 0;
+			push(@{$result{remaining}}, $target_pid);
+			next;
+		}
+		kill_pid_with_escalation_without_decrypt($target_pid, $as_user);
+		push(@{$result{killed}}, $target_pid);
+	}
+	sleep 1;
+	foreach my $target_pid (sort { $b <=> $a } keys %candidate)
+	{
+		push(@{$result{remaining}}, $target_pid) if(is_pid_alive_without_decrypt($target_pid));
+	}
+	$result{success} = 0 if(@{$result{remaining}});
+	return \%result;
+}
+
+sub kill_home_pid_files_without_decrypt
+{
+	my ($home_path, $as_user) = @_;
+	return unless(defined($home_path) && $home_path ne "");
+	foreach my $target (read_home_pid_targets_without_decrypt($home_path))
+	{
+		logger "Attempting forced stop for $target->{source} PID $target->{pid}.";
+		kill_pid_tree_with_escalation_without_decrypt($target->{pid}, $as_user, $home_path, $target->{source});
 	}
 }
 
 sub force_kill_tracked_and_port_without_decrypt
 {
-	my ($home_id, $server_port, $as_user) = @_;
+	my ($home_id, $server_port, $as_user, $home_path) = @_;
 	my $pid_meta = read_pid_metadata($home_id);
 	my @tracked_pids = ();
 	push(@tracked_pids, $pid_meta->{game_pid}) if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/);
-	push(@tracked_pids, $pid_meta->{screen_pid}) if(defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/);
 	my %seen;
 	foreach my $pid (@tracked_pids)
 	{
 		next if($seen{$pid});
 		$seen{$pid} = 1;
-		kill_pid_with_escalation_without_decrypt($pid, $as_user);
+		kill_pid_tree_with_escalation_without_decrypt($pid, $as_user, $home_path, "runtime_status");
 	}
-	my $port_pid = find_process_pid_by_port_without_decrypt($server_port, "any");
-	if($port_pid =~ /^\d+$/)
+	foreach my $port_pid (find_process_pids_by_port_without_decrypt($server_port, "any"))
 	{
-		kill_pid_with_escalation_without_decrypt($port_pid, $as_user);
+		next if($seen{$port_pid});
+		$seen{$port_pid} = 1;
+		next if(process_is_protected_without_decrypt($port_pid));
+		next if(defined($home_path) && $home_path ne "" && !process_associated_with_home_without_decrypt($port_pid, $home_path));
+		kill_pid_tree_with_escalation_without_decrypt($port_pid, $as_user, $home_path, "port:$server_port");
 	}
+}
+
+# Build a stable evidence snapshot used by stop verification and structured failures.
+sub lifecycle_stop_evidence_without_decrypt
+{
+	my ($home_id, $server_ip, $server_port, $home_path) = @_;
+	my $pid_meta = read_pid_metadata($home_id);
+	my @home_targets = read_home_pid_targets_without_decrypt($home_path);
+	my @tracked_pids = ();
+	foreach my $target (@home_targets)
+	{
+		push(@tracked_pids, $target->{pid}) if($target->{pid} =~ /^\d+$/);
+	}
+	push(@tracked_pids, $pid_meta->{game_pid}) if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/);
+	push(@tracked_pids, $pid_meta->{screen_pid}) if(defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/);
+	my %seen;
+	@tracked_pids = grep { !$seen{$_}++ } @tracked_pids;
+
+	my @remaining_pids = grep { is_pid_alive_without_decrypt($_) } @tracked_pids;
+	my @port_pids = find_process_pids_by_port_without_decrypt($server_port, "any");
+	my $session_running = is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1 ? 1 : 0;
+	return {
+		session_running => $session_running,
+		process_running => @remaining_pids ? 1 : 0,
+		port_listening => @port_pids ? 1 : 0,
+		remaining_pids => \@remaining_pids,
+		port_pids => \@port_pids,
+		tracked_pids => \@tracked_pids
+	};
+}
+
+sub safe_port_owner_status_without_decrypt
+{
+	my ($pid, $home_path, $tracked_roots) = @_;
+	return "protected" if(process_is_protected_without_decrypt($pid));
+	if(ref($tracked_roots) eq 'HASH')
+	{
+		foreach my $root_pid (keys %$tracked_roots)
+		{
+			return "safe" if($pid == $root_pid || process_lineage_contains_without_decrypt($pid, $root_pid));
+		}
+	}
+	return "safe" if(process_associated_with_home_without_decrypt($pid, $home_path));
+	return "ambiguous";
+}
+
+# Shared authoritative hard-stop implementation for Stop, Force Stop, Restart, and Start preflight.
+sub hard_stop_server_without_decrypt
+{
+	my ($home_id, $server_ip, $server_port, $home_path, %options) = @_;
+	my %result = (
+		success => 0,
+		status => 'cleanup_failed',
+		message => '',
+		killed_pids => [],
+		remaining_pids => [],
+		port_pids => [],
+		failures => []
+	);
+	if(!defined($home_id) || $home_id !~ /^[0-9]+$/ || !defined($home_path) || $home_path eq "" || !-d $home_path ||
+	   !defined($server_port) || $server_port !~ /^[0-9]+$/ || $server_port < 1 || $server_port > 65535 ||
+	   !defined($server_ip) || $server_ip =~ /^\s*$/)
+	{
+		$result{status} = 'invalid_target';
+		$result{message} = 'Invalid lifecycle cleanup target.';
+		return \%result;
+	}
+
+	if(!write_desired_state_without_decrypt($home_path, "stopped"))
+	{
+		$result{status} = 'invalid_target';
+		$result{message} = "Unable to write stopped desired state in $home_path.";
+		return \%result;
+	}
+
+	my $startup_file = Path::Class::File->new(GAME_STARTUP_DIR, "$server_ip-$server_port");
+	if($options{remove_startup} && -e $startup_file)
+	{
+		logger "Removing startup flag " . $startup_file . "";
+		unlink($startup_file) or logger "Cannot remove the startup flag file $startup_file $!";
+	}
+
+	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
+	my $as_user = find_user_by_screen_id($screen_id);
+	my $managed_screen_pid = get_screen_pid_without_decrypt($home_id);
+	cleanup_server_content_hooks_without_decrypt($home_path, $as_user);
+
+	logger "Hard stop targeting HOME ID:$home_id $server_ip:$server_port.";
+	sudo_exec_without_decrypt('screen -S '.$screen_id.' -X quit', $as_user);
+	sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
+
+	my @pid_targets = read_home_pid_targets_without_decrypt($home_path);
+	my $pid_meta = read_pid_metadata($home_id);
+	push(@pid_targets, { pid => $managed_screen_pid, source => "screen_session" })
+		if(defined($managed_screen_pid) && $managed_screen_pid =~ /^\d+$/);
+	push(@pid_targets, { pid => $pid_meta->{game_pid}, source => "runtime_status:game_pid" })
+		if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/);
+
+	my %tracked_roots = ();
+	my %seen_target = ();
+	foreach my $target (@pid_targets)
+	{
+		next unless($target->{pid} =~ /^\d+$/);
+		$tracked_roots{$target->{pid}} = 1;
+		next if($seen_target{$target->{pid}}++);
+		my $kill = kill_pid_tree_with_escalation_without_decrypt($target->{pid}, $as_user, $home_path, $target->{source});
+		push(@{$result{killed_pids}}, @{$kill->{killed}});
+		if(!$kill->{success})
+		{
+			push(@{$result{failures}}, $kill->{failure} || "PID $target->{pid} survived cleanup");
+		}
+	}
+
+	foreach my $port_pid (find_process_pids_by_port_without_decrypt($server_port, "any"))
+	{
+		my $owner_status = safe_port_owner_status_without_decrypt($port_pid, $home_path, \%tracked_roots);
+		if($owner_status eq "protected")
+		{
+			$result{status} = 'protected_port_owner';
+			push(@{$result{failures}}, "Protected process $port_pid owns port $server_port.");
+			next;
+		}
+		if($owner_status eq "ambiguous")
+		{
+			$result{status} = 'ambiguous_port_owner';
+			push(@{$result{failures}}, "Ambiguous process $port_pid owns port $server_port and is not associated with $home_path.");
+			next;
+		}
+		my $kill = kill_pid_tree_with_escalation_without_decrypt($port_pid, $as_user, $home_path, "port:$server_port");
+		push(@{$result{killed_pids}}, @{$kill->{killed}});
+		push(@{$result{failures}}, $kill->{failure} || "Port owner $port_pid survived cleanup") unless($kill->{success});
+	}
+
+	my $evidence;
+	for(my $i = 0; $i < 30; $i++)
+	{
+		$evidence = lifecycle_stop_evidence_without_decrypt($home_id, $server_ip, $server_port, $home_path);
+		last if(!$evidence->{session_running} && !$evidence->{process_running} && !$evidence->{port_listening});
+		sleep 2;
+	}
+	$evidence = lifecycle_stop_evidence_without_decrypt($home_id, $server_ip, $server_port, $home_path);
+	$result{remaining_pids} = $evidence->{remaining_pids};
+	$result{port_pids} = $evidence->{port_pids};
+
+	if(!@{$result{failures}} && !$evidence->{session_running} && !$evidence->{process_running} && !$evidence->{port_listening})
+	{
+		clear_lifecycle_runtime_files_without_decrypt($home_id, $home_path);
+		$result{success} = 1;
+		$result{status} = 'STOPPED';
+		$result{message} = 'Hard stop verified: screen, watchdog, bot, game, and assigned port are inactive.';
+		return \%result;
+	}
+
+	$result{status} = 'cleanup_failed' if($result{status} eq 'cleanup_failed' && !@{$result{failures}});
+	push(@{$result{failures}}, "screen still active") if($evidence->{session_running});
+	push(@{$result{failures}}, "tracked PIDs still active: " . join(',', @{$evidence->{remaining_pids}})) if(@{$evidence->{remaining_pids}});
+	push(@{$result{failures}}, "port owners still active: " . join(',', @{$evidence->{port_pids}})) if(@{$evidence->{port_pids}});
+	$result{message} = join(' ', @{$result{failures}});
+	return \%result;
 }
 
 sub get_screen_pid_without_decrypt
@@ -1551,8 +2264,6 @@ sub server_status_without_decrypt
 		$query_port_listening = $query_port ne "" ? is_port_listening_without_decrypt($server_ip, $query_port) : 0;
 		$rcon_port_listening = $rcon_port ne "" ? is_port_listening_without_decrypt($server_ip, $rcon_port) : 0;
 	}
-	my ($hint_timestamp, $stored_hint) = read_status_hint($home_id);
-	my $effective_hint = $state_hint ne "" ? $state_hint : $stored_hint;
 	my $last_error = "";
 	my $status = "UNKNOWN";
 	my $status_state = "Unknown";
@@ -1584,17 +2295,6 @@ sub server_status_without_decrypt
 			$status_state = "Warning";
 			$ready = 1;
 			$last_error = "Process/session exists, but some expected ports are not listening.";
-		}
-		elsif($effective_hint eq "STOPPING")
-		{
-			$status = "STOPPING";
-			$status_state = "Stopping";
-		}
-		elsif($hint_timestamp > 0 && (time() - $hint_timestamp) > $startup_timeout)
-		{
-			$status = "UNRESPONSIVE";
-			$status_state = "Failed";
-			$last_error = "Process/session exists but game port is not listening after startup timeout.";
 		}
 		else
 		{
@@ -1666,15 +2366,20 @@ sub universal_start_without_decrypt
 		$startup_cmd, $server_port, $server_ip, $cpu, $nice, $preStart, $envVars, $game_key, $console_log
 	   ) = @_;
 
-	if (is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1)
-	{
-		logger "This server is already running (ID: $home_id).";
-		return -14;
-	}
-
 	if (!-e $home_path)
 	{
 		logger "Can't find server's install path [ $home_path ].";
+		return -10;
+	}
+	my ($game_root_ok, $game_root, $game_root_error) = resolve_game_root_without_decrypt($home_path, $game_key);
+	if(!$game_root_ok)
+	{
+		logger "Invalid game_key for HOME ID:$home_id at $home_path: $game_root_error";
+		return -17;
+	}
+	if(!-d $game_root)
+	{
+		logger "Can't find game payload root [ $game_root ] beneath management home [ $home_path ].";
 		return -10;
 	}
 
@@ -1683,7 +2388,6 @@ sub universal_start_without_decrypt
 	my $gspAgentGroup = `whoami`;
 
 	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
-	my $status_hint_file = get_status_hint_path($home_id);
 
 	chomp $gspAgentGroup;
 
@@ -1703,6 +2407,13 @@ sub universal_start_without_decrypt
 		}
 	}
 
+	my $preflight = hard_stop_server_without_decrypt($home_id, $server_ip, $server_port, $home_path, remove_startup => 0, preflight => 1);
+	if(!$preflight->{success})
+	{
+		logger "Start preflight failed for $server_ip:$server_port: " . ($preflight->{message} || $preflight->{status});
+		return -15;
+	}
+
 	# Fix perms on the GSE agent user's homedir so other users can access owned files within this dir.
 	my $fixGSPHomeDirCommand = 'chmod -R ug+rwx $( getent passwd "' . $gspAgentGroup . '" | cut -d: -f6 )';
 	sudo_exec_without_decrypt($fixGSPHomeDirCommand);
@@ -1711,8 +2422,13 @@ sub universal_start_without_decrypt
 	sudo_exec_without_decrypt($fixGSPHomeDirCommand);
 
 	# Some game require that we are in the directory where the binary is.
-	my $game_binary_dir = Path::Class::Dir->new($home_path, $run_dir);
-	if ( -e $game_binary_dir && !chdir $game_binary_dir)
+	my ($payload_path_ok, $game_binary_dir, $payload_path_error) = resolve_game_payload_path_without_decrypt($home_path, $game_key, $run_dir);
+	if(!$payload_path_ok)
+	{
+		logger "Invalid game executable directory for HOME ID:$home_id at $home_path: $payload_path_error";
+		return -17;
+	}
+	if ( !-d $game_binary_dir || !chdir $game_binary_dir)
 	{
 		logger "Could not change to server binary directory $game_binary_dir.";
 		return -12;
@@ -1745,7 +2461,7 @@ sub universal_start_without_decrypt
 		my @prestartenvvars = split /[\r\n]+/, $envVars;
 		my $envVarStr = "";
 		foreach my $line (@prestartenvvars) {
-			$line = replace_GSP_Env_Vars("", $home_id, $home_path, $line, $game_key);
+			$line = replace_GSP_Env_Vars("", $home_id, $game_root, $line, $game_key);
 			if($line ne ""){
 				logger "Configuring environment variable: $line";
 				$envVarStr .= "$line\n";
@@ -1783,6 +2499,13 @@ sub universal_start_without_decrypt
 	if(defined $preStart && $preStart ne ""){
 		# Get it in the format that the startup file can use
 		$preStart = startup_comma_format_to_multiline($preStart);
+		my @prestart_lines = split /[\r\n]+/, $preStart;
+		my $prestart_str = "";
+		foreach my $line (@prestart_lines) {
+			$line = replace_GSP_Env_Vars("", $home_id, $game_root, $line, $game_key);
+			$prestart_str .= "$line\n" if($line ne "");
+		}
+		$preStart = $prestart_str if($prestart_str ne "");
 	}else{
 		$preStart = "";
 	}
@@ -1802,7 +2525,7 @@ sub universal_start_without_decrypt
 	prepare_server_content_runtime_without_decrypt($home_path);
 
 	# Replace any GSP compatibility variables found in the command line
-	$startup_cmd = replace_GSP_Env_Vars($screen_id, $home_id, $home_path, $startup_cmd, $game_key);
+	$startup_cmd = replace_GSP_Env_Vars($screen_id, $home_id, $game_root, $startup_cmd, $game_key);
 
 	if($file_extension eq ".exe" or $file_extension eq ".bat")
 	{
@@ -1814,7 +2537,7 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
 		}
@@ -1829,7 +2552,7 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
 		}
@@ -1844,31 +2567,30 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
 		}
 	}
 
 	my $log_file = Path::Class::File->new(SCREEN_LOGS_DIR, "screenlog.$screen_id");
-	backup_home_log( $home_id, $log_file, $home_path . "/" . $console_log );
+	backup_home_log( $home_id, $log_file, $game_root . "/" . $console_log );
 
 	logger
 	  "Startup command [ $cli_bin ] will be executed in dir $game_binary_dir.";
 
-	# Fix permissions one last time (for backup_home_log created folder / files / etc)
-	my $server_start_bashfile = $screen_id . "_startup_scr.sh";
-	secure_path_without_decrypt('chattr-i', $server_start_bashfile);
+	# Fix permissions one last time after backup_home_log created folders or files.
 	set_path_ownership($owner, $group, $home_path, 1);
-	my $readOnlyOwnerCmd = "chmod -Rf og-r '$server_start_bashfile'";
-	sudo_exec_without_decrypt($readOnlyOwnerCmd);
-	secure_path_without_decrypt('chattr+i', $server_start_bashfile);
 
 	# Run before start script
 	$run_before_start = run_before_start_commands($home_id, $home_path, $preStart, $owner);
 
+	if(!write_desired_state_without_decrypt($home_path, "running"))
+	{
+		logger "Unable to write running desired state in $home_path.";
+		return -16;
+	}
 	sudo_exec_without_decrypt($cli_bin, $owner);
-	write_status_hint($home_id, "STARTING");
 
 	sleep(1);
 	my @started_pids = get_home_pids($home_id);
@@ -1883,6 +2605,7 @@ sub universal_start_without_decrypt
 	queue_agent_event("server_process_started", "info", {
 		home_id => $home_id,
 		game_home_path => $home_path,
+		game_root => $game_root,
 		ip => $server_ip,
 		game_port => $server_port,
 		screen_session_name => $screen_id,
@@ -2264,244 +2987,45 @@ sub stop_server_without_decrypt
 	my ($home_id, $server_ip, $server_port, $control_protocol,
 		$control_password, $control_type, $home_path) = @_;
 
-	my $usedProtocolToStop = 0;
-	write_status_hint($home_id, "STOPPING");
-
-	my $startup_file = Path::Class::File->new(GAME_STARTUP_DIR, "$server_ip-$server_port");
-
-	if (-e $startup_file)
+	my $stop = hard_stop_server_without_decrypt($home_id, $server_ip, $server_port, $home_path, remove_startup => 1);
+	if($stop->{success})
 	{
-		logger "Removing startup flag " . $startup_file . "";
-		unlink($startup_file)
-		  or logger "Cannot remove the startup flag file $startup_file $!";
+		queue_agent_event("server_stop_confirmed", "info", {
+			home_id => $home_id,
+			ip => $server_ip,
+			game_port => $server_port,
+			tracked_pid => join(',', @{$stop->{killed_pids}}),
+			actual_process_state => "stopped",
+			actual_session_state => "stopped",
+			actual_port_state => "closed",
+			message => $stop->{message}
+		});
+		return 0;
 	}
-
-	# Some validation checks for the variables.
-	if ($server_ip =~ /^\s*$/ || $server_port < 0 || $server_port > 65535)
-	{
-		logger("Invalid IP:Port given $server_ip:$server_port.");
-		return 1;
-	}
-
-	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
-	my $as_user = find_user_by_screen_id($screen_id);
-	cleanup_server_content_hooks_without_decrypt($home_path, $as_user);
-
-	# Stop the owning screen/watchdog first, then kill the captured game/bot PIDs from the home folder.
-	sudo_exec_without_decrypt('screen -S '.$screen_id.' -X quit', $as_user);
-	sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
-	kill_home_pid_files_without_decrypt($home_path, $as_user);
-
-	if ($control_password !~ /^\s*$/ and $control_protocol ne "")
-	{
-		if ($control_protocol eq "rcon")
-		{
-			use KKrcon::KKrcon;
-			my $rcon = new KKrcon(
-								  Password => $control_password,
-								  Host	 => $server_ip,
-								  Port	 => $server_port,
-								  Type	 => $control_type
-								 );
-
-			my $rconCommand = "quit";
-			$rcon->execute($rconCommand);
-			$usedProtocolToStop = 1;
-		}
-		elsif ($control_protocol eq "rcon2")
-		{
-			use KKrcon::HL2;
-			my $rcon2 = new HL2(
-								  hostname => $server_ip,
-								  port	 => $server_port,
-								  password => $control_password,
-								  timeout  => 2
-								 );
-
-			my $rconCommand = "quit";
-			$rcon2->run($rconCommand);
-			$usedProtocolToStop = 1;
-		}
-		elsif ($control_protocol eq "armabe")
-		{
-			use ArmaBE::ArmaBE;
-			my $armabe = new ArmaBE(
-								  hostname => $server_ip,
-								  port	 => $server_port, # Uses server port for now (Arma 2), Arma 3 BE uses a different, user definable port
-								  password => $control_password,
-								  timeout  => 2
-								 );
-
-			my $rconCommand = "#shutdown";
-			my $armabe_result = $armabe->run($rconCommand);
-			if ($armabe_result) {
-				logger "ArmaBE Shutdown command sent successfully";
-				$usedProtocolToStop = 1;
-			}
-		}
-		elsif ($control_protocol eq "minecraft")
-		{
-			use Minecraft::RCON;
-			my $strip_color = 1;
-
-			my $rconPort = get_minecraft_rcon_port($home_path);
-
-			logger "Minecraft rcon port detected as $rconPort with path of $home_path";
-
-			if ($rconPort != -1){
-				my $minecraft;
-				my $response;
-
-				eval {
-					$minecraft = Minecraft::RCON->new(
-						{
-							address     => $server_ip,
-							port        => $rconPort,
-							password    => $control_password,
-							color_mode  => $strip_color ? 'strip' : 'convert',
-						}
-					);
-				};
-
-				if (defined $minecraft)
-				{
-					eval { $minecraft->connect };
-					logger "Minecraft rcon module connection failed: $@" if $@;
-
-
-					my $rconCommand = "/stop";
-					eval { $response = $minecraft->command($rconCommand) };
-					logger $@ ? "Minecraft rcon error: $@" : "Minecraft rcon module response: $response";
-
-					eval { $minecraft->disconnect; };
-
-					if (defined $response) {
-						logger "Minecraft Shutdown command sent successfully";
-						$usedProtocolToStop = 1;
-					}
-				}
-			}
-		}
-
-		my @server_pids;
-
-		# Gives the server time to shutdown with rcon in case it takes a while for the server to shutdown (arma for example) before we forcefully kill it
-		if ($usedProtocolToStop == 1 && is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1){
-			@server_pids = get_home_pids($home_id);
-			my $timeWaited = 0;
-			my $pidSize = @server_pids;
-			my $maxWaitTime = 5;
-
-			# Maximum time to wait can now be configured as a preference
-			if(defined($Cfg::Preferences{protocol_shutdown_waittime}) && $Cfg::Preferences{protocol_shutdown_waittime} =~ /^\d+?$/){
-				$maxWaitTime = $Cfg::Preferences{protocol_shutdown_waittime};
-			}
-
-			while ($pidSize > 0 && $timeWaited < $maxWaitTime && is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1) {
-				select(undef, undef, undef, 0.25); # Sleeps for 250ms
-
-				# Add to time waited
-				$timeWaited += 0.25;
-
-				# Recheck server home PIDs
-				@server_pids = get_home_pids($home_id);
-				$pidSize = @server_pids;
-			}
-		}
-
-			if (is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 0)
-			{
-				logger "Stopped server $server_ip:$server_port with rcon quit.";
-				force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
-				return verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port);
-			}
-		else
-		{
-			logger "Failed to send rcon quit. Stopping server with kill command.";
-		}
-
-		@server_pids = get_home_pids($home_id);
-
-		my $cnt;
-		my $out;
-		foreach my $pid (@server_pids)
-		{
-			chomp($pid);
-			$cnt = sudo_exec_without_decrypt("kill 15 $pid", $as_user);
-			($cnt, $out) = split(/;/, $cnt, 2);
-			if ($cnt == -1)
-			{
-				$cnt = sudo_exec_without_decrypt("kill 9 $pid", $as_user);
-				($cnt, $out) = split(/;/, $cnt, 2);
-				if ($cnt == -1)
-				{
-					logger "Process $pid can not be stopped.";
-				}
-				else
-				{
-					logger "Stopped process with pid $pid successfully using kill 9.";
-				}
-			}
-			else
-			{
-				logger "Stopped process with pid $pid successfully using kill 15.";
-			}
-		}
-			sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
-			force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
-			return verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port);
-		}
-	else
-	{
-		logger "Remote control protocol not available or PASSWORD NOT SET. Using kill signal instead.";
-		my @server_pids = get_home_pids($home_id);
-
-		my $cnt;
-		my $out;
-		foreach my $pid (@server_pids)
-		{
-			chomp($pid);
-			$cnt = sudo_exec_without_decrypt("kill 15 $pid", $as_user);
-			($cnt, $out) = split(/;/, $cnt, 2);
-			if ($cnt == -1)
-			{
-				$cnt = sudo_exec_without_decrypt("kill 9 $pid", $as_user);
-				($cnt, $out) = split(/;/, $cnt, 2);
-				if ($cnt == -1)
-				{
-					logger "Process $pid can not be stopped.";
-				}
-				else
-				{
-					logger "Stopped process with pid $pid successfully using kill 9.";
-				}
-			}
-			else
-			{
-				logger "Stopped process with pid $pid successfully using kill 15.";
-			}
-		}
-			sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
-			force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
-			return verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port);
-		}
-	}
+	logger "Server $server_ip:$server_port could not be fully stopped: " . ($stop->{message} || $stop->{status});
+	queue_agent_event("server_unresponsive", "error", {
+		home_id => $home_id,
+		ip => $server_ip,
+		game_port => $server_port,
+		tracked_pid => join(',', @{$stop->{remaining_pids}}),
+		actual_process_state => @{$stop->{remaining_pids}} ? "running" : "stopped",
+		actual_session_state => "unknown",
+		actual_port_state => @{$stop->{port_pids}} ? "listening" : "closed",
+		message => $stop->{message} || "Server remained active after hard stop."
+	});
+	return 1;
+}
 
 sub verify_runtime_stop_complete_without_decrypt
 {
-	my ($home_id, $server_ip, $server_port) = @_;
+	my ($home_id, $server_ip, $server_port, $home_path) = @_;
 	my $pid_meta = read_pid_metadata($home_id);
 	for(my $i = 0; $i < 30; $i++)
 	{
-		my $session_running = is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1 ? 1 : 0;
-		my $pid_running = 0;
-		$pid_running = 1 if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{game_pid}) == 1);
-		$pid_running = 1 if(!$pid_running && defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{screen_pid}) == 1);
-		my $port_listening = is_port_listening_without_decrypt($server_ip, $server_port);
-		if(!$session_running && !$pid_running && !$port_listening)
+		my $evidence = lifecycle_stop_evidence_without_decrypt($home_id, $server_ip, $server_port, $home_path);
+		if(!$evidence->{session_running} && !$evidence->{process_running} && !$evidence->{port_listening})
 		{
-			clear_pid_metadata($home_id);
-			write_status_hint($home_id, "STOPPED");
+			clear_lifecycle_runtime_files_without_decrypt($home_id, $home_path);
 			queue_agent_event("server_stop_confirmed", "info", {
 				home_id => $home_id,
 				ip => $server_ip,
@@ -2521,13 +3045,9 @@ sub verify_runtime_stop_complete_without_decrypt
 	sudo_exec_without_decrypt('screen -S '.$screen_id.' -X quit', $as_user);
 	sleep 2;
 	sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
-	force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
-	my $session_running = is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1 ? 1 : 0;
-	my $pid_running = 0;
-	$pid_running = 1 if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{game_pid}) == 1);
-	$pid_running = 1 if(!$pid_running && defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{screen_pid}) == 1);
-	my $port_listening = is_port_listening_without_decrypt($server_ip, $server_port);
-	if($session_running || $pid_running || $port_listening)
+	force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user, $home_path);
+	my $evidence = lifecycle_stop_evidence_without_decrypt($home_id, $server_ip, $server_port, $home_path);
+	if($evidence->{session_running} || $evidence->{process_running} || $evidence->{port_listening})
 	{
 		logger "Server $server_ip:$server_port is still running or listening after stop escalation.";
 		queue_agent_event("server_unresponsive", "error", {
@@ -2535,15 +3055,14 @@ sub verify_runtime_stop_complete_without_decrypt
 			ip => $server_ip,
 			game_port => $server_port,
 			tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
-			actual_process_state => $pid_running ? "running" : "stopped",
-			actual_session_state => $session_running ? "running" : "stopped",
-			actual_port_state => $port_listening ? "listening" : "closed",
+			actual_process_state => $evidence->{process_running} ? "running" : "stopped",
+			actual_session_state => $evidence->{session_running} ? "running" : "stopped",
+			actual_port_state => $evidence->{port_listening} ? "listening" : "closed",
 			message => "Server remained active after stop escalation."
 		});
 		return 1;
 	}
-	clear_pid_metadata($home_id);
-	write_status_hint($home_id, "STOPPED");
+	clear_lifecycle_runtime_files_without_decrypt($home_id, $home_path);
 	queue_agent_event("server_stop_confirmed", "info", {
 		home_id => $home_id,
 		ip => $server_ip,
@@ -2572,49 +3091,11 @@ sub force_stop_server_without_decrypt
 	{
 		return component_update_response(success => 0, status => 'invalid_target', message => 'Invalid force-stop target.', home_id => $home_id || '', ip => $server_ip || '', port => $server_port || '');
 	}
-	write_status_hint($home_id, "FORCE_STOPPING");
-	my $startup_file = Path::Class::File->new(GAME_STARTUP_DIR, "$server_ip-$server_port");
-	unlink($startup_file) if(-e $startup_file);
-
-	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
-	my $as_user = find_user_by_screen_id($screen_id);
-	cleanup_server_content_hooks_without_decrypt($home_path, $as_user) if(defined($home_path) && $home_path ne "");
-	my $pid_meta = read_pid_metadata($home_id);
-	my @attempted_pids = ();
-	push(@attempted_pids, $pid_meta->{game_pid}) if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/);
-	push(@attempted_pids, $pid_meta->{screen_pid}) if(defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/);
-	my $screen_pid = get_screen_pid_without_decrypt($home_id);
-	push(@attempted_pids, $screen_pid) if($screen_pid =~ /^\d+$/);
-	my $port_pid = find_process_pid_by_port_without_decrypt($server_port, "any");
-	push(@attempted_pids, $port_pid) if($port_pid =~ /^\d+$/);
-	my %seen_attempt;
-	@attempted_pids = grep { !$seen_attempt{$_}++ } @attempted_pids;
 
 	logger "Force stop requested for HOME ID:$home_id $server_ip:$server_port.";
-	sudo_exec_without_decrypt('screen -S '.$screen_id.' -X quit', $as_user);
-	sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
-	kill_home_pid_files_without_decrypt($home_path, $as_user) if(defined($home_path) && $home_path ne "");
-	force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user);
-	my $verify = verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port);
-
-	my $session_running = is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1 ? 1 : 0;
-	my $process_running = 0;
-	my @remaining = ();
-	foreach my $pid (@attempted_pids)
-	{
-		if($pid =~ /^\d+$/ && is_pid_alive_without_decrypt($pid))
-		{
-			$process_running = 1;
-			push(@remaining, $pid);
-		}
-	}
-	my $port_listening = is_port_listening_without_decrypt($server_ip, $server_port);
-	my $success = (!$session_running && !$process_running && !$port_listening && $verify == 0) ? 1 : 0;
-	if($success)
-	{
-		clear_pid_metadata($home_id);
-		write_status_hint($home_id, "STOPPED");
-	}
+	my $hard_stop = hard_stop_server_without_decrypt($home_id, $server_ip, $server_port, $home_path, remove_startup => 1, force => 1);
+	my $evidence = lifecycle_stop_evidence_without_decrypt($home_id, $server_ip, $server_port, $home_path);
+	my $success = $hard_stop->{success} ? 1 : 0;
 	my $message = $success ? 'Force Stop completed. The game server was not restarted.' : 'Force Stop could not fully stop the server. Review remaining process/session/port state.';
 	queue_agent_event($success ? "server_force_stop_confirmed" : "server_force_stop_failed", $success ? "warning" : "error", {
 		home_id => $home_id,
@@ -2624,17 +3105,18 @@ sub force_stop_server_without_decrypt
 	});
 	return component_update_response(
 		success => $success,
-		status => $success ? 'STOPPED' : 'UNRESPONSIVE',
+		status => $success ? 'STOPPED' : $hard_stop->{status},
 		message => $message,
 		home_id => $home_id,
 		ip => $server_ip,
 		port => $server_port,
-		session_running => $session_running,
-		process_running => $process_running,
-		port_listening => $port_listening,
-		attempted_pids => join(',', @attempted_pids),
-		killed_pids => join(',', @attempted_pids),
-		remaining_pids => join(',', @remaining),
+		session_running => $evidence->{session_running},
+		process_running => $evidence->{process_running},
+		port_listening => $evidence->{port_listening},
+		attempted_pids => join(',', @{$evidence->{tracked_pids}}),
+		killed_pids => join(',', @{$hard_stop->{killed_pids}}),
+		remaining_pids => join(',', @{$hard_stop->{remaining_pids}}),
+		failure_reason => $hard_stop->{message} || $hard_stop->{status},
 		log_hint => AGENT_LOG_FILE
 	);
 }
@@ -3074,21 +3556,24 @@ sub start_file_download
 			{
 				logger "Running postscript commands.";
 				my @postcmdlines = split /[\r\n]+/, $post_script;
-				my $postcmdfile = $destination."/".'postinstall.sh';
-				open  FILE, '>', $postcmdfile;
-				print FILE "cd $destination\n";
-				foreach my $line (@postcmdlines) {
-					logger "Postscript command received \"" . $line ."\".";
-					if(handle_lock_command_line($line) == 0){
-						print FILE "$line\n";
+			mkpath(MANUAL_TMP_DIR) unless(-d MANUAL_TMP_DIR);
+			my $postcmdfile = Path::Class::File->new(MANUAL_TMP_DIR, "postinstall.$$.".time().".sh");
+			my $quoted_destination = shell_single_quote($destination);
+			my $quoted_postcmdfile = shell_single_quote($postcmdfile);
+			open  FILE, '>', $postcmdfile;
+			print FILE "cd $quoted_destination\n";
+			foreach my $line (@postcmdlines) {
+				logger "Postscript command received \"" . $line ."\".";
+				if(handle_lock_command_line($line) == 0){
+					print FILE "$line\n";
 					}else{
-						logger "Lock command completed successfully";
-					}
+					logger "Lock command completed successfully";
 				}
-				print FILE "rm -f $destination/postinstall.sh\n";
-				close FILE;
-				chmod 0755, $postcmdfile;
-				my $screen_id = create_screen_id("post_script", $$);
+			}
+			print FILE "rm -f $quoted_postcmdfile\n";
+			close FILE;
+			chmod 0755, $postcmdfile;
+			my $screen_id = create_screen_id("post_script", $$);
 				my $cli_bin = create_screen_cmd($screen_id, "bash $postcmdfile");
 				system($cli_bin);
 			}
@@ -3205,9 +3690,11 @@ sub startup_comma_format_to_multiline{
 
 sub create_secure_script
 {
-	my ($home_path, $exec_folder_path, $exec_path) = @_;
+	my ($home_path, $exec_folder_path, $exec_path, $management_scripts_path) = @_;
 	secure_path_without_decrypt('chattr-i', $home_path);
-	my $secure = "$home_path/secure.sh";
+	$management_scripts_path = $home_path unless(defined($management_scripts_path) && $management_scripts_path ne "");
+	mkpath($management_scripts_path) unless(-d $management_scripts_path);
+	my $secure = "$management_scripts_path/secure.sh";
 	$home_path =~ s/('+)/'\"$1\"'/g;
 	$exec_folder_path =~ s/('+)/'\"$1\"'/g;
 	$exec_path =~ s/('+)/'\"$1\"'/g;
@@ -3305,6 +3792,8 @@ sub create_bash_scripts
 
 	$home_path         =~ s/('+)/'\"$1\"'/g;
 	$bash_scripts_path =~ s/('+)/'\"$1\"'/g;
+	my $tmp_secure_script = "$bash_scripts_path/secure.sh";
+	my $legacy_secure_script = "$home_path/secure.sh";
 
 	my @precmdlines = split /[\r\n]+/, $precmd;
 	my $precmdfile = 'preinstall.sh';
@@ -3324,8 +3813,9 @@ sub create_bash_scripts
 		print FILE "$line\n";
 	}
 	print FILE "cd '$home_path'\n".
-			   "echo '".$SUDOPASSWD."' | sudo -S -p \" \" bash secure.sh\n".
-			   "rm -f secure.sh\n".
+			   "SECURE_SCRIPT='$tmp_secure_script'\n".
+			   "if [ ! -f \"\$SECURE_SCRIPT\" ] && [ -f '$legacy_secure_script' ]; then SECURE_SCRIPT='$legacy_secure_script'; fi\n".
+			   "if [ -f \"\$SECURE_SCRIPT\" ]; then echo '".$SUDOPASSWD."' | sudo -S -p \" \" bash \"\$SECURE_SCRIPT\"; rm -f \"\$SECURE_SCRIPT\"; fi\n".
 			   "cd '$bash_scripts_path'\n".
 			   "rm -f preinstall.sh\n".
 			   "rm -f postinstall.sh\n".
@@ -3366,14 +3856,13 @@ sub start_rsync_install
 		return 0;
 	}
 
-	create_secure_script($home_path, $exec_folder_path, $exec_path);
-
 	my $bash_scripts_path = MANUAL_TMP_DIR . "/home_id_" . $home_id;
 
 	if ( check_b4_chdir($bash_scripts_path, $owner) != 0)
 	{
 		return 0;
 	}
+	create_secure_script($home_path, $exec_folder_path, $exec_path, $bash_scripts_path);
 
 	# Rsync install require the rsync binary to exist in the system
 	# to enable this functionality.
@@ -3424,14 +3913,13 @@ sub master_server_update
 		return 0;
 	}
 
-	create_secure_script($home_path, $exec_folder_path, $exec_path);
-
 	my $bash_scripts_path = MANUAL_TMP_DIR . "/home_id_" . $home_id;
 
 	if ( check_b4_chdir($bash_scripts_path, $owner) != 0)
 	{
 		return 0;
 	}
+	create_secure_script($home_path, $exec_folder_path, $exec_path, $bash_scripts_path);
 
 	my $screen_id = create_screen_id(SCREEN_TYPE_UPDATE, $home_id);
 
@@ -3500,14 +3988,13 @@ sub steam_cmd_without_decrypt
 		return 0;
 	}
 
-	create_secure_script($home_path, $exec_folder_path, $exec_path);
-
 	my $bash_scripts_path = MANUAL_TMP_DIR . "/home_id_" . $home_id;
 
 	if ( check_b4_chdir($bash_scripts_path, $owner) != 0)
 	{
 		return 0;
 	}
+	create_secure_script($home_path, $exec_folder_path, $exec_path, $bash_scripts_path);
 
 	my $screen_id = create_screen_id(SCREEN_TYPE_UPDATE, $home_id);
 	my $screen_id_for_txt_update = substr ($screen_id, rindex($screen_id, '_') + 1);
@@ -4810,7 +5297,7 @@ sub restart_server_without_decrypt
 	{
 		logger "Waiting 60 seconds before starting the server again.";
 		sleep 60;
-		if (verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port) != 0)
+		if (verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port, $home_path) != 0)
 		{
 			logger "Restart cancelled: previous instance is still active after stop wait window.";
 			queue_agent_event($restart_failed_event, "error", {
@@ -6852,16 +7339,6 @@ sub steam_workshop_without_decrypt
 		return -1;
 	}
 
-	my $secure = "$mods_full_path/secure.sh";
-	my $home_path = $mods_full_path;
-	$home_path =~ s/('+)/'\"$1\"'/g;
-	my $sec = $secure;
-	$sec =~ s/('+)/'\"$1\"'/g;
-	open  FILE, '>', $secure;
-	print FILE	"chmod 771 '$home_path'\n".
-				"rm -f '$sec'";
-	close FILE;
-
 	my $screen_id = create_screen_id(SCREEN_TYPE_UPDATE, $home_id);
 	my @workshop_mods = split /,/, $mods_list;
 	my @installcmds;
@@ -6939,6 +7416,15 @@ sub steam_workshop_without_decrypt
 	{
 		return -1;
 	}
+	my $secure = "$bash_scripts_path/secure.sh";
+	my $home_path = $mods_full_path;
+	$home_path =~ s/('+)/'\"$1\"'/g;
+	my $sec = $secure;
+	$sec =~ s/('+)/'\"$1\"'/g;
+	open  FILE, '>', $secure;
+	print FILE	"chmod 771 '$home_path'\n".
+				"rm -f '$sec'";
+	close FILE;
 
 	my $installfile = create_bash_scripts($mods_full_path, $bash_scripts_path, $precmd, $postcmd, @installcmds);
 
