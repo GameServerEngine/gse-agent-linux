@@ -1,0 +1,34 @@
+=== GIT STATUS ===
+ M docs/PANEL_INTEGRATION.md
+ M documentation/agent-guide.md
+ M gsp_agent.pl
+ M tests/validate_linux_agent_contract.sh
+?? .devplus/
+?? AGENTS.md
+?? CODEX_INSTRUCTIONS_VERIFY_AGENT_UI.md
+?? docs/codex-history/2026/2026-07-26-0926-linux-watchdog-stop-coordination.md
+?? docs/codex-history/2026/2026-07-26-0931-linux-watchdog-stop-final-review.md
+?? tests/validate_watchdog_stop_contract.sh
+=== FUNCTION INDEX ===
+=== RELEVANT FILES ===
+./agent_conf.sh
+./AGENTS.md
+./CODEX_INSTRUCTIONS_VERIFY_AGENT_UI.md
+./db/gsp_process_samples.sql
+./docs/AGENT_ACTIVITY_EVENTS.md
+./docs/agent-modernization-step-1-divergence-report.md
+./documentation/agent-guide.md
+./gsp_agent.pl
+./gsp_agent_run
+./gsp_screenrc
+./gsp_screenrc_bk
+./includes/gsp_agent.init
+./includes/gsp_agent.init.dbn
+./includes/gsp_agent.init.gentoo
+./includes/gsp_agent.init.rh
+./install_agent_prereqs.sh
+./startups/173.208.236.122-5400
+./startups/192.168.1.100-25565
+./systemd/gsp_agent.service
+./tests/validate_linux_agent_contract.sh
+./tests/validate_watchdog_stop_contract.sh

@@ -1,0 +1,3 @@
+branch=unstable head=ccc859d5c47e upstream=origin/unstable behind_ahead=0	0 latest_tag=none dirty=18
+05b7d2e464b48343c2e26667630d2f6bbc19647f refs/heads/stable
+ccc859d5c47ee78e1d7e1f723a0fc736a3665be0 refs/heads/unstable

@@ -1,0 +1,14 @@
+[unstable 648092e] Implement deterministic Linux game lifecycle parity
+ 17 files changed, 2817 insertions(+), 439 deletions(-)
+ create mode 100644 AGENTS.md
+ create mode 100644 CODEX_INSTRUCTIONS_VERIFY_AGENT_UI.md
+ create mode 100644 docs/GAME_SERVER_LIFECYCLE_CONTRACT.md
+ create mode 100644 docs/codex-history/2026/2026-07-26-0926-linux-watchdog-stop-coordination.md
+ create mode 100644 docs/codex-history/2026/2026-07-26-0931-linux-watchdog-stop-final-review.md
+ create mode 100644 docs/codex-history/2026/2026-07-27-1017-linux-lifecycle-contract-inspection.md
+ create mode 100644 docs/codex-history/2026/2026-07-27-1031-linux-hard-stop-state.md
+ create mode 100644 docs/codex-history/2026/2026-07-27-1040-linux-watchdog-parity-supervisor.md
+ create mode 100644 docs/codex-history/2026/2026-07-27-1048-linux-game-key-path-parity-tests.md
+ create mode 100644 docs/codex-history/2026/2026-07-27-1057-linux-lifecycle-final-review.md
+ create mode 100755 tests/validate_lifecycle_game_key_contract.sh
+ create mode 100755 tests/validate_watchdog_stop_contract.sh

@@ -1,0 +1,496 @@
+85:  Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent.pid');
+122:use constant FD_PID_FILE => Path::Class::File->new(FD_DIR, 'fd.pid');
+123:use constant SCHED_PID => Path::Class::File->new(AGENT_RUN_DIR, 'Schedule', 'scheduler.pid');
+132:my $agent_pid_file = AGENT_PID_FILE;
+138:		   'pidfile=s'	 => \$agent_pid_file
+141:sub preference_value
+149:sub preference_enabled
+167:sub logger
+198:sub agent_event_panel_url
+212:sub agent_event_remote_server_id
+219:sub prepare_server_content_runtime_without_decrypt
+232:	my $pid_file = "$home_path/_gsp_content/runtime/server_content.pids";
+233:	if(!-e $pid_file && open(my $fh, '>', $pid_file))
+239:sub append_server_content_pid_without_decrypt
+241:	my ($pid_file, $pid, $role, $label) = @_;
+242:	return unless(defined($pid_file) && $pid_file ne "" && defined($pid) && $pid =~ /^\d+$/);
+243:	$role = "app" unless(defined($role) && $role =~ /^(watchdog|app|main_server)$/i);
+245:	if(open(my $fh, '>>', $pid_file))
+247:		print $fh "$role $pid $label\n";
+252:sub import_legacy_also_run_pids_without_decrypt
+256:	prepare_server_content_runtime_without_decrypt($home_path);
+257:	my $pid_file = "$home_path/_gsp_content/runtime/server_content.pids";
+259:	foreach my $legacy_pid_file ("$home_path/_alsoRun.pid", bsd_glob("$home_path/*/_alsoRun.pid"))
+261:		next if(!defined($legacy_pid_file) || $legacy_pid_file eq "" || !-f $legacy_pid_file);
+262:		if(open(my $in, '<', $legacy_pid_file))
+267:				my ($pid) = $line =~ /(\d{2,})/;
+268:				next unless(defined($pid) && !$seen{$pid});
+269:				$seen{$pid} = 1;
+270:				append_server_content_pid_without_decrypt($pid_file, $pid, "app", "legacy_alsoRun");
+277:sub cleanup_server_content_pid_group_without_decrypt
+279:	my ($pid_file, $wanted_role, $as_user) = @_;
+280:	return if(!-f $pid_file);
+284:	if(!open($in, '<', $pid_file))
+286:		logger "Could not read server content PID file $pid_file: $!";
+295:		my ($pid) = $line =~ /(?:^|[^\d])(\d{2,})(?:[^\d]|$)/;
+296:		my $role = ($line =~ /watchdog/i) ? "watchdog" : "app";
+298:		if(defined($pid) && $role eq $wanted_role)
+300:			next if($killed{$pid});
+301:			$killed{$pid} = 1;
+302:			logger "Stopping server-content $role PID $pid from $pid_file.";
+303:			sudo_exec_without_decrypt("kill -TERM $pid >/dev/null 2>&1 || true", $as_user);
+304:			sleep 1 if($wanted_role eq "watchdog");
+305:			sudo_exec_without_decrypt("kill -KILL $pid >/dev/null 2>&1 || true", $as_user);
+311:	if(open(my $out, '>', $pid_file))
+321:sub cleanup_server_content_hooks_without_decrypt
+325:	import_legacy_also_run_pids_without_decrypt($home_path);
+326:	my $pid_file = "$home_path/_gsp_content/runtime/server_content.pids";
+327:	cleanup_server_content_pid_group_without_decrypt($pid_file, "watchdog", $as_user);
+328:	cleanup_server_content_pid_group_without_decrypt($pid_file, "app", $as_user);
+331:sub new_correlation_id
+336:sub new_agent_event_uuid
+341:sub build_agent_event
+362:sub agent_event_json
+368:sub send_agent_event
+388:sub append_agent_event_queue
+405:sub flush_agent_event_queue
+441:sub queue_agent_event
+454:sub agent_event_state_path
+461:sub read_agent_event_state
+478:sub write_agent_event_state
+494:sub record_server_state_transition
+663:		next if $dirlist =~ /^(?:status|pid)-/;
+684:			universal_start_without_decrypt(
+695:# Create the pid file
+696:open(PID, '>', $agent_pid_file)
+697:  or die("Can't write to pid file - " . $agent_pid_file . "\n");
+747:$cron->run( {detach=>1, pid_file=>SCHED_PID} );
+762:					 force_stop_server				=> \&force_stop_server,
+763:					 universal_start			  	=> \&universal_start,
+773:				 stop_server				  	=> \&stop_server,
+794:				 restart_server			   		=> \&restart_server,
+831:sub backup_home_log
+939:sub get_home_pids
+943:	my ($pid, @pids);
+951:		logger "Unable to get pids, probably a bad sudo password or not in sudoers list.";
+959:	($pid) = split(/\./, $out, 2);
+960:	if(defined $pid)
+962:		chomp($pid);
+963:		while ($pid =~ /^[0-9]+$/)
+965:			push(@pids,$pid);
+966:			$pid = `pgrep -P $pid`;
+967:			chomp($pid);
+970:	return @pids;
+973:sub create_screen_id
+979:sub create_screen_cmd
+989:sub shell_single_quote
+997:sub create_screen_cmd_loop
+1017:	my $watchdog_script = "#!/bin/bash\n"
+1023:	. "watchdog_exit_if_stop_requested() {\n"
+1035:	. "rm -f _alsoRun.bat _alsoRun.pid\n"
+1036:	. "echo \$\$ > \"\$HOME_PATH/watchdog.pid\"\n";
+1039:		$watchdog_script .= $envVars;
+1042:	$watchdog_script .= "BOT_WORKDIR=\"\"\n"
+1045:	. "if [ -f _alsoRun.cmd ]; then\n"
+1052:	. "    done < _alsoRun.cmd\n"
+1055:	. "    watchdog_exit_if_stop_requested\n"
+1058:	. "    if [ -f game.pid ]; then GAME_PID=\$(cat game.pid 2>/dev/null); fi\n"
+1061:	. "        watchdog_exit_if_stop_requested\n"
+1062:	. "        rm -f game.pid\n"
+1064:	. "        echo \$! > \"\$HOME_PATH/game.pid\"\n"
+1070:	. "        if [ -f bot.pid ]; then BOT_PID=\$(cat bot.pid 2>/dev/null); fi\n"
+1073:	. "            watchdog_exit_if_stop_requested\n"
+1074:	. "            rm -f bot.pid\n"
+1076:	. "            echo \$! > \"\$HOME_PATH/bot.pid\"\n"
+1083:	print SERV_START_SCRIPT $watchdog_script;
+1098:sub handle_lock_command_line{
+1110:sub replace_GSP_Env_Vars{
+1150:sub encode_list
+1163:sub decrypt_param
+1172:sub decrypt_params
+1183:sub check_steam_cmd_client
+1221:sub is_screen_running
+1228:sub is_screen_running_without_decrypt
+1263:sub server_status
+1269:sub get_status_hint_path
+1276:sub write_status_hint
+1287:sub read_status_hint
+1302:sub get_pid_metadata_path
+1306:	return Path::Class::File->new(SERVER_RUNTIME_DIR, "pid-$home_id.kv");
+1309:sub write_pid_metadata
+1313:	my $file = get_pid_metadata_path($home_id);
+1328:sub read_pid_metadata
+1332:	my $file = get_pid_metadata_path($home_id);
+1347:sub clear_pid_metadata
+1350:	my $file = get_pid_metadata_path($home_id);
+1354:sub is_pid_alive_without_decrypt
+1356:	my ($pid) = @_;
+1357:	return 0 unless(defined($pid) && $pid =~ /^\d+$/ && $pid > 0);
+1358:	return kill(0, $pid) ? 1 : 0;
+1361:sub kill_pid_with_escalation_without_decrypt
+1363:	my ($pid, $as_user) = @_;
+1364:	return 0 unless(defined($pid) && $pid =~ /^\d+$/);
+1365:	my $cnt = sudo_exec_without_decrypt("kill 15 $pid", $as_user);
+1369:		$cnt = sudo_exec_without_decrypt("kill 9 $pid", $as_user);
+1375:sub find_process_pid_by_port_without_decrypt
+1385:		push(@commands, "ss -lntp '( sport = :$port )' 2>/dev/null | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | head -1");
+1390:		push(@commands, "ss -lnup '( sport = :$port )' 2>/dev/null | sed -n 's/.*pid=\\([0-9]\\+\\).*/\\1/p' | head -1");
+1394:		my $pid = `$command`;
+1395:		chomp($pid);
+1396:		return $pid if($pid =~ /^\d+$/);
+1401:sub kill_home_pid_files_without_decrypt
+1405:	foreach my $pid_name ("watchdog.pid", "bot.pid", "game.pid")
+1407:		my $pid_file = "$home_path/$pid_name";
+1408:		if(open(my $PIDFILE, '<', $pid_file))
+1410:			while(my $pid = <$PIDFILE>)
+1412:				chomp($pid);
+1413:				next unless($pid =~ /^\d+$/);
+1414:				logger "Attempting forced stop for $pid_name PID $pid.";
+1415:				kill_pid_with_escalation_without_decrypt($pid, $as_user);
+1419:		unlink($pid_file) if(-e $pid_file);
+1423:sub force_kill_tracked_and_port_without_decrypt
+1426:	my $pid_meta = read_pid_metadata($home_id);
+1427:	my @tracked_pids = ();
+1428:	push(@tracked_pids, $pid_meta->{game_pid}) if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/);
+1429:	push(@tracked_pids, $pid_meta->{screen_pid}) if(defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/);
+1431:	foreach my $pid (@tracked_pids)
+1433:		next if($seen{$pid});
+1434:		$seen{$pid} = 1;
+1435:		kill_pid_with_escalation_without_decrypt($pid, $as_user);
+1437:	my $port_pid = find_process_pid_by_port_without_decrypt($server_port, "any");
+1438:	if($port_pid =~ /^\d+$/)
+1440:		kill_pid_with_escalation_without_decrypt($port_pid, $as_user);
+1444:sub get_screen_pid_without_decrypt
+1458:sub is_port_listening_without_decrypt
+1486:sub add_expected_port
+1494:sub build_expected_ports
+1510:sub validate_expected_ports
+1529:sub has_listening_port_named
+1539:sub server_status_without_decrypt
+1549:	my $screen_pid = $session_running ? get_screen_pid_without_decrypt($home_id) : "";
+1550:	my $pid_meta = read_pid_metadata($home_id);
+1551:	my $game_pid = defined($pid_meta->{game_pid}) ? $pid_meta->{game_pid} : "";
+1552:	my $linux_pid = $game_pid;
+1553:	my $pid_running = 0;
+1554:	$pid_running = 1 if($screen_pid ne "" && is_pid_alive_without_decrypt($screen_pid) == 1);
+1555:	$pid_running = 1 if(!$pid_running && $game_pid ne "" && is_pid_alive_without_decrypt($game_pid) == 1);
+1556:	my $process_running = ($session_running || $pid_running) ? 1 : 0;
+1626:		clear_pid_metadata($home_id);
+1638:		pid_running => $pid_running,
+1653:		pid => $game_pid ne "" ? $game_pid : $screen_pid,
+1654:		screen_pid => $screen_pid,
+1655:		windows_pid => "",
+1656:		linux_pid => $linux_pid,
+1671:sub universal_start
+1675:	return universal_start_without_decrypt(decrypt_params(@_));
+1679:sub universal_start_without_decrypt
+1819:	prepare_server_content_runtime_without_decrypt($home_path);
+1833:		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
+1834:			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file, $home_path, $game_binary_dir);
+1836:			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
+1848:		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
+1849:			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file, $home_path, $game_binary_dir);
+1851:			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
+1863:		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
+1864:			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file, $home_path, $game_binary_dir);
+1866:			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
+1891:	my @started_pids = get_home_pids($home_id);
+1892:	my $game_pid = @started_pids > 0 ? $started_pids[0] : "";
+1893:	my $screen_pid = get_screen_pid_without_decrypt($home_id);
+1894:	write_pid_metadata($home_id, {
+1895:		screen_pid => $screen_pid,
+1896:		game_pid => $game_pid,
+1906:		tracked_pid => $game_pid,
+1907:		detected_process_pid => $game_pid,
+1909:		actual_session_state => $screen_pid ne "" ? "present" : "unknown",
+1924:sub renice_process
+1930:sub renice_process_without_decrypt
+1935:		my @pids = get_home_pids($home_id);
+1937:		  "Renicing pids [ @pids ] from home_id $home_id with nice value $nice.";
+1938:		foreach my $pid (@pids)
+1940:			my $ret = sudo_exec_without_decrypt('/usr/bin/renice '.$nice.' '.$pid);
+1953:sub force_cpu
+1958:sub force_cpu_without_decrypt
+1963:		my @pids = get_home_pids($home_id);
+1965:		  "Setting server from home_id $home_id with pids @pids to run on CPU $cpu.";
+1966:		foreach my $pid (@pids)
+1968:			my $rpid = kill 0, $pid;
+1969:			if ($rpid == 1)
+1971:				my $ret = sudo_exec_without_decrypt('/usr/bin/taskset -pc '.$cpu.' '.$pid);
+1985:sub cpu_count
+2013:sub rfile_exists
+2036:sub quick_chk
+2047:sub log_path_has_wildcards
+2053:sub wildcard_pattern_to_regex
+2102:sub resolve_latest_log_match
+2148:sub get_log
+2269:sub stop_server
+2273:	return stop_server_without_decrypt(decrypt_params(@_));
+2279:sub stop_server_without_decrypt
+2305:	cleanup_server_content_hooks_without_decrypt($home_path, $as_user);
+2307:	# Stop the owning screen/watchdog first, then kill the captured game/bot PIDs from the home folder.
+2310:	kill_home_pid_files_without_decrypt($home_path, $as_user);
+2403:		my @server_pids;
+2407:			@server_pids = get_home_pids($home_id);
+2409:			my $pidSize = @server_pids;
+2417:			while ($pidSize > 0 && $timeWaited < $maxWaitTime && is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1) {
+2424:				@server_pids = get_home_pids($home_id);
+2425:				$pidSize = @server_pids;
+2440:		@server_pids = get_home_pids($home_id);
+2444:		foreach my $pid (@server_pids)
+2446:			chomp($pid);
+2447:			$cnt = sudo_exec_without_decrypt("kill 15 $pid", $as_user);
+2451:				$cnt = sudo_exec_without_decrypt("kill 9 $pid", $as_user);
+2455:					logger "Process $pid can not be stopped.";
+2459:					logger "Stopped process with pid $pid successfully using kill 9.";
+2464:				logger "Stopped process with pid $pid successfully using kill 15.";
+2474:		my @server_pids = get_home_pids($home_id);
+2478:		foreach my $pid (@server_pids)
+2480:			chomp($pid);
+2481:			$cnt = sudo_exec_without_decrypt("kill 15 $pid", $as_user);
+2485:				$cnt = sudo_exec_without_decrypt("kill 9 $pid", $as_user);
+2489:					logger "Process $pid can not be stopped.";
+2493:					logger "Stopped process with pid $pid successfully using kill 9.";
+2498:				logger "Stopped process with pid $pid successfully using kill 15.";
+2507:sub verify_runtime_stop_complete_without_decrypt
+2510:	my $pid_meta = read_pid_metadata($home_id);
+2514:		my $pid_running = 0;
+2515:		$pid_running = 1 if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{game_pid}) == 1);
+2516:		$pid_running = 1 if(!$pid_running && defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{screen_pid}) == 1);
+2518:		if(!$session_running && !$pid_running && !$port_listening)
+2520:			clear_pid_metadata($home_id);
+2526:				tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
+2543:	my $pid_running = 0;
+2544:	$pid_running = 1 if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{game_pid}) == 1);
+2545:	$pid_running = 1 if(!$pid_running && defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/ && is_pid_alive_without_decrypt($pid_meta->{screen_pid}) == 1);
+2547:	if($session_running || $pid_running || $port_listening)
+2554:			tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
+2555:			actual_process_state => $pid_running ? "running" : "stopped",
+2562:	clear_pid_metadata($home_id);
+2568:		tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
+2577:sub force_stop_server
+2582:	return force_stop_server_without_decrypt($home_id, $server_ip, $server_port, $home_path);
+2585:sub force_stop_server_without_decrypt
+2598:	cleanup_server_content_hooks_without_decrypt($home_path, $as_user) if(defined($home_path) && $home_path ne "");
+2599:	my $pid_meta = read_pid_metadata($home_id);
+2600:	my @attempted_pids = ();
+2601:	push(@attempted_pids, $pid_meta->{game_pid}) if(defined($pid_meta->{game_pid}) && $pid_meta->{game_pid} =~ /^\d+$/);
+2602:	push(@attempted_pids, $pid_meta->{screen_pid}) if(defined($pid_meta->{screen_pid}) && $pid_meta->{screen_pid} =~ /^\d+$/);
+2603:	my $screen_pid = get_screen_pid_without_decrypt($home_id);
+2604:	push(@attempted_pids, $screen_pid) if($screen_pid =~ /^\d+$/);
+2605:	my $port_pid = find_process_pid_by_port_without_decrypt($server_port, "any");
+2606:	push(@attempted_pids, $port_pid) if($port_pid =~ /^\d+$/);
+2608:	@attempted_pids = grep { !$seen_attempt{$_}++ } @attempted_pids;
+2613:	kill_home_pid_files_without_decrypt($home_path, $as_user) if(defined($home_path) && $home_path ne "");
+2620:	foreach my $pid (@attempted_pids)
+2622:		if($pid =~ /^\d+$/ && is_pid_alive_without_decrypt($pid))
+2625:			push(@remaining, $pid);
+2632:		clear_pid_metadata($home_id);
+2652:		attempted_pids => join(',', @attempted_pids),
+2653:		killed_pids => join(',', @attempted_pids),
+2654:		remaining_pids => join(',', @remaining),
+2662:sub send_rcon_command
+2755:sub dirlist
+2780:sub dirlistfm
+2910:sub readfile
+2949:sub writefile
+2992:sub rebootnow
+3001:sub what_os
+3038:sub start_file_download
+3057:	my $pid = fork();
+3058:	if (not defined $pid)
+3065:	elsif ($pid == 0)
+3109:				my $cli_bin = create_screen_cmd($screen_id, "bash $postcmdfile");
+3125:		logger "Download process for $download_file_path has pid number $pid.";
+3126:		return "$pid";
+3130:sub lock_additional_files{
+3136:sub lock_additional_files_logic{
+3173:sub run_before_start_commands
+3203:sub multiline_to_startup_comma_format{
+3211:sub multiline_to_bash_commands{
+3217:sub startup_comma_format_to_multiline{
+3223:sub create_secure_script
+3245:sub check_b4_chdir
+3284:sub set_path_ownership
+3319:sub create_bash_scripts
+3374:sub start_rsync_install
+3421:	my $screen_cmd = create_screen_cmd($screen_id, "./$installfile");
+3433:sub master_server_update
+3487:	my $screen_cmd = create_screen_cmd($screen_id, "./$installfile");
+3495:sub steam_cmd
+3505:sub steam_cmd_without_decrypt
+3602:	my $screen_cmd = create_screen_cmd($screen_id, "./$installfile");
+3610:sub fetch_steam_version
+3630:sub installed_steam_version
+3645:sub automatic_steam_update
+3673:		if (stop_server_without_decrypt($home_id, $server_ip, $server_port, $control_protocol, $control_password, $control_type, $game_home) != 0)
+3697:					if (universal_start_without_decrypt($home_id, $game_home, $exec_path, $exec_folder_path, $startup_cmd, $server_port, $server_ip, $cpu, $nice, $preStart, $envVars, $game_key, $console_log) != 1)
+3721:sub rsync_progress
+3738:sub is_file_download_in_progress
+3741:	my ($pid) = &decrypt_param(@_);
+3742:	logger "User requested if download is in progress with pid $pid.";
+3743:	my @pids = `ps -ef`;
+3744:	@pids = grep(/$pid/, @pids);
+3745:	logger "Number of pids for file download: @pids";
+3746:	if (@pids > '0')
+3756:sub uncompress_file
+3762:sub uncompress_file_without_decrypt
+3824:sub compress_files
+3830:sub compress_files_without_decrypt
+3974:sub discover_ips
+4022:sub mon_stats
+4137:sub ensure_dbi_available
+4151:sub submit_resource_stats_to_db
+4227:sub create_resource_stats_tables
+4282:			`pid` int(11) NOT NULL,
+4296:			KEY `idx_proc_pid` (`machine_id`,`pid`,`ts`),
+4308:sub get_machine_id
+4321:sub get_local_ip
+4333:sub ensure_machine_registered
+4354:sub get_extended_system_metrics
+4400:sub insert_machine_sample
+4427:sub collect_and_insert_process_samples
+4484:		my $screen_pid_line = `screen -ls 2>/dev/null | grep '$session'`;
+4485:		my ($screen_pid) = $screen_pid_line =~ /(\d+)\./;
+4487:		if ($screen_pid && $screen_pid =~ /^\d+$/) {
+4489:			my @child_pids = `pgrep -P $screen_pid 2>/dev/null`;
+4490:			push @child_pids, $screen_pid; # Include the screen process itself
+4492:			foreach my $pid (@child_pids) {
+4493:				chomp($pid);
+4494:				next unless $pid && $pid =~ /^\d+$/;
+4497:				my $proc_info = get_process_info($pid, $server_name, $server_path);
+4537:		my @pids = `pgrep -f '$exe_name' 2>/dev/null`;
+4538:		foreach my $pid (@pids) {
+4539:			chomp($pid);
+4540:			next unless $pid && $pid =~ /^\d+$/;
+4543:			next if grep { $_->{pid} == $pid } @processes;
+4549:				my $server_name = $startup_info->{server_id} || "Unknown_Server_PID$pid";
+4552:				my $proc_info = get_process_info($pid, $server_name, $server_path);
+4562:			machine_id, ts, server_name, server_path, pid, proc_name, cmd, cpu_pct, rss_bytes, vms_bytes,
+4573:				$machine_id, $proc->{server_name}, $proc->{server_path}, $proc->{pid}, $proc->{proc_name},
+4581:			logger "Error inserting process sample for PID $proc->{pid}: $@";
+4589:sub get_process_info
+4591:	my ($pid, $server_name, $server_path) = @_;
+4593:	# Get process stats from /proc/<pid>/stat
+4594:	my $stat_file = "/proc/$pid/stat";
+4606:	my $cmd = `cat /proc/$pid/cmdline 2>/dev/null | tr '\\0' ' '`;
+4609:	# Get memory info from /proc/<pid>/status
+4611:	if (open(STATUS, "/proc/$pid/status")) {
+4619:	# Get CPU percentage (using utime + stime from /proc/pid/stat)
+4651:	if (open(IO, "/proc/$pid/io")) {
+4661:	my $fd_dir = "/proc/$pid/fd";
+4670:	my $netstat_output = `netstat -tlnp 2>/dev/null | grep '$pid/' | awk '{print \$4}' | cut -d: -f2 | sort -n | uniq`;
+4694:		pid => $pid,
+4709:sub exec
+4720:sub clone_home
+4756:sub remove_home
+4793:sub restart_server
+4797:	return restart_server_without_decrypt(decrypt_params(@_));
+4804:sub restart_server_without_decrypt
+4824:		if (stop_server_without_decrypt($home_id, $server_ip,
+4843:		if (universal_start_without_decrypt($home_id, $home_path, $server_exe, $run_dir,
+4885:sub find_user_by_screen_id
+4936:sub get_path_owner
+4979:sub sudo_exec
+4986:sub sudo_exec_without_decrypt
+5011:sub sudo_exec_without_decrypt_no_return
+5036:sub secure_path
+5043:sub secure_path_without_decrypt
+5079:sub get_chattr
+5088:sub ftp_mgr
+5442:sub start_fastdl
+5456:sub stop_fastdl
+5462:sub stop_fastdl_without_decrypt
+5464:	my $pid;
+5466:	  || logger "Error reading pid file $!",1;
+5469:		$pid = $_;
+5470:		chomp $pid;
+5473:	my $cnt = kill 9, $pid;
+5481:		logger "Fast Download Daemon with pid $pid can not be stopped.",1;
+5486:sub restart_fastdl
+5492:sub restart_fastdl_without_decrypt
+5508:sub fastdl_status
+5514:sub fastdl_status_without_decrypt
+5516:	my $pid;
+5519:		logger "Error reading pid file $!";
+5524:		$pid = $_;
+5525:		chomp $pid;
+5528:	my $cnt = kill 0, $pid;
+5539:sub fastdl_get_aliases
+5587:sub fastdl_del_alias
+5597:sub fastdl_add_alias
+5625:sub fastdl_get_info
+5644:sub fastdl_create_config
+5677:sub agent_read_first_line
+5691:sub agent_cpu_usage_percent
+5709:sub agent_ram_usage_percent
+5727:sub agent_disk_usage_percent
+5739:sub agent_version
+5748:sub agent_resource_snapshot
+5770:sub agent_update_status
+5790:sub agent_self_update
+5869:sub component_update_shell_quote
+5877:sub component_update_response
+5888:sub component_update_parse_payload
+5900:sub component_update
+5987:tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./*.pid' -czf "\$ARCHIVE" -C "\$DEST" . >> "\$LOG" 2>&1 || fail "Backup failed"
+5989:  rsync -a --exclude='Cfg/' --exclude='ServerFiles/' --exclude='Schedule/' --exclude='logs/' --exclude='screenlogs/' --exclude='steamcmd/' --exclude='startups/' --exclude='tmp/' --exclude='shared/' --exclude='component_backups/' --exclude='*.pid' "\$SRC"/ "\$DEST"/ >> "\$LOG" 2>&1 || fail "rsync copy failed"
+5991:  (cd "\$SRC" && tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./*.pid' -cf - .) | (cd "\$DEST" && tar -xf -) >> "\$LOG" 2>&1 || fail "tar copy failed"
+6014:if [ -f gsp_agent_run.pid ]; then kill "\$(cat gsp_agent_run.pid)" >/dev/null 2>&1 || true; fi
+6015:if [ -f gsp_agent.pid ]; then kill "\$(cat gsp_agent.pid)" >/dev/null 2>&1 || true; fi
+6018:  screen -d -m -t "gsp_agent" -c $screenrc_q -S gsp_agent bash gsp_agent_run -pidfile gsp_agent_run.pid >> "\$LOG" 2>&1 || true
+6044:sub agent_restart
+6051:			if(-e "gsp_agent_run.pid")
+6053:				my $run_pid_file = "gsp_agent_run.pid";
+6054:			my $init_pid	= `cat $run_pid_file`;
+6055:			chomp($init_pid);
+6057:			if(kill 0, $init_pid)
+6060:				my $rm_pid_file	= "";
+6061:				if(-e "gsp_agent.pid")
+6063:					$rm_pid_file	= " gsp_agent.pid";
+6064:					my $agent_pid	= `cat gsp_agent.pid`;
+6065:					chomp($agent_pid);
+6066:					if( kill 0, $agent_pid )
+6068:						$or_exist = " -o -e /proc/$agent_pid";
+6074:							  "kill $init_pid\n".
+6075:							  "while [ -e /proc/$init_pid $or_exist ];do echo -n .;sleep 1;done\n".
+6076:								  "rm -f gsp_agent_run.pid $rm_pid_file\necho \" [OK]\"\n".
+6078:							  "screen -d -m -t \"gsp_agent\" -c \"" . SCREENRC_FILE . "\" -S gsp_agent bash gsp_agent_run -pidfile gsp_agent_run.pid\n".
+6079:							  "while [ ! -e gsp_agent_run.pid -o ! -e gsp_agent.pid ];do echo -n .;sleep 1;done\n".
+6096:sub scheduler_dispatcher {
+6108:sub collect_and_submit_resource_stats {
+6221:sub scheduler_server_action
+6228:		my $ret = universal_start_without_decrypt(@server_args);
+6241:		my $ret = stop_server_without_decrypt(@server_args);
+6254:		my $ret = restart_server_without_decrypt(@server_args, "scheduled_restart");
+6271:sub scheduler_log_events
+6283:sub scheduler_add_task
+6302:		$cron->run( {detach=>1, pid_file=>SCHED_PID} );
+6309:sub scheduler_del_task
+6344:		$cron->run( {detach=>1, pid_file=>SCHED_PID} );
+6351:sub scheduler_edit_task
+6391:		$cron->run( {detach=>1, pid_file=>SCHED_PID} );
+6398:sub scheduler_read_tasks
+6476:sub scheduler_stop
+6478:	my $pid;
+6481:		$pid = <PIDFILE>;
+6482:		chomp $pid;
+6484:		if($pid ne "")
+6486:			if( kill 0, $pid )
+6488:				my $cnt = kill 9, $pid;
+6500:sub scheduler_list_tasks
+6526:sub get_file_part
+6563:sub stop_update
+6576:sub shell_action
+6768:sub remote_query
+6825:sub send_steam_guard_code
+6838:sub steam_workshop
+6848:sub steam_workshop_without_decrypt
+6962:	my $screen_cmd = create_screen_cmd($screen_id, "./$installfile");
+7095:sub get_workshop_mods_info()
+7143:sub get_setting_using_api
+7160:sub is_integer {
+7164:sub get_minecraft_rcon_port{
+7184:sub begins_with
+7189:sub generate_random_password{
+7206:sub trim{

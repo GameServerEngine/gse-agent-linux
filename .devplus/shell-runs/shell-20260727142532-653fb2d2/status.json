@@ -1,0 +1,17 @@
+{
+  "cwd": "/home/dev/Projects/GSE-Agent-Linux",
+  "ended_utc": "2026-07-27T14:25:32Z",
+  "operation_id": "shell-20260727142532-653fb2d2",
+  "project": "GSE-Agent-Linux",
+  "request_type": "shell_run",
+  "returncode": 0,
+  "started_utc": "2026-07-27T14:25:32Z",
+  "status": "completed",
+  "status_path": "/home/dev/Projects/GSE-Agent-Linux/.devplus/shell-runs/shell-20260727142532-653fb2d2/status.json",
+  "stderr_chars": 0,
+  "stderr_path": "/home/dev/Projects/GSE-Agent-Linux/.devplus/shell-runs/shell-20260727142532-653fb2d2/stderr.log",
+  "stdout_chars": 13509,
+  "stdout_path": "/home/dev/Projects/GSE-Agent-Linux/.devplus/shell-runs/shell-20260727142532-653fb2d2/stdout.log",
+  "success": true,
+  "timedOut": false
+}

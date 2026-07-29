@@ -1,0 +1,435 @@
+			push(@pids,$pid);
+			$pid = `pgrep -P $pid`;
+			chomp($pid);
+		}
+	}
+	return @pids;
+}
+
+sub create_screen_id
+{
+	my ($screen_type, $home_id) = @_;
+	return sprintf("GSP_%s_%09d", $screen_type, $home_id);
+}
+
+sub create_screen_cmd
+{
+	my ($screen_id, $exec_cmd) = @_;
+	$exec_cmd = replace_GSP_Env_Vars($screen_id, "", "", $exec_cmd);
+	return
+	  sprintf('export WINEDEBUG="fixme-all" && export DISPLAY=:1 && screen -d -m -t "%1$s" -c ' . SCREENRC_FILE . ' -S %1$s %2$s',
+			  $screen_id, $exec_cmd);
+
+}
+
+sub shell_single_quote
+{
+	my ($value) = @_;
+	$value = "" unless(defined($value));
+	$value =~ s/'/'"'"'/g;
+	return "'" . $value . "'";
+}
+
+sub create_screen_cmd_loop
+{
+	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file, $home_path, $game_workdir) = @_;
+	my $server_start_bashfile = $screen_id . "_startup_scr.sh";
+
+	$exec_cmd = replace_GSP_Env_Vars($screen_id, "", "", $exec_cmd);
+	$home_path = "." unless(defined($home_path) && $home_path ne "");
+	$game_workdir = "." unless(defined($game_workdir) && $game_workdir ne "");
+
+	my $quoted_home_path = shell_single_quote($home_path);
+	my $quoted_game_workdir = shell_single_quote($game_workdir);
+	my $quoted_exec_cmd = shell_single_quote($exec_cmd);
+	my $quoted_status_hint_file = shell_single_quote($status_hint_file);
+
+	if(-e $server_start_bashfile){
+		secure_path_without_decrypt('chattr-i', $server_start_bashfile);
+	}
+
+	open (SERV_START_SCRIPT, '>', $server_start_bashfile);
+
+	my $watchdog_script = "#!/bin/bash\n"
+	. "set +e\n"
+	. "HOME_PATH=$quoted_home_path\n"
+	. "GAME_WORKDIR=$quoted_game_workdir\n"
+	. "GAME_COMMAND=$quoted_exec_cmd\n"
+	. "STATUS_HINT_FILE=$quoted_status_hint_file\n"
+	. "watchdog_exit_if_stop_requested() {\n"
+	. "    WATCHDOG_STATUS_LINE=\"\"\n"
+	. "    WATCHDOG_STATUS_HINT=\"\"\n"
+	. "    if [ -n \"\$STATUS_HINT_FILE\" ] && [ -f \"\$STATUS_HINT_FILE\" ]; then\n"
+	. "        IFS= read -r WATCHDOG_STATUS_LINE < \"\$STATUS_HINT_FILE\" 2>/dev/null || true\n"
+	. "        WATCHDOG_STATUS_HINT=\"\${WATCHDOG_STATUS_LINE#*,}\"\n"
+	. "        case \"\$WATCHDOG_STATUS_HINT\" in\n"
+	. "            STOPPING|FORCE_STOPPING|STOPPED) exit 0 ;;\n"
+	. "        esac\n"
+	. "    fi\n"
+	. "}\n"
+	. "cd \"\$HOME_PATH\" || exit 1\n"
+	. "rm -f _alsoRun.bat _alsoRun.pid\n"
+	. "echo \$\$ > \"\$HOME_PATH/watchdog.pid\"\n";
+
+	if(defined $envVars && $envVars ne ""){
+		$watchdog_script .= $envVars;
+	}
+
+	$watchdog_script .= "BOT_WORKDIR=\"\"\n"
+	. "BOT_EXE=\"\"\n"
+	. "BOT_ARGS=\"\"\n"
+	. "if [ -f _alsoRun.cmd ]; then\n"
+	. "    while IFS='=' read -r key value; do\n"
+	. "        case \"\$key\" in\n"
+	. "            workdir) BOT_WORKDIR=\"\$value\" ;;\n"
+	. "            executable) BOT_EXE=\"\$value\" ;;\n"
+	. "            arguments) BOT_ARGS=\"\$value\" ;;\n"
+	. "        esac\n"
+	. "    done < _alsoRun.cmd\n"
+	. "fi\n"
+	. "while true; do\n"
+	. "    watchdog_exit_if_stop_requested\n"
+	. "    GAME_RUNNING=0\n"
+	. "    GAME_PID=\"\"\n"
+	. "    if [ -f game.pid ]; then GAME_PID=\$(cat game.pid 2>/dev/null); fi\n"
+	. "    if echo \"\$GAME_PID\" | grep -Eq '^[0-9]+$' && kill -0 \"\$GAME_PID\" >/dev/null 2>&1; then GAME_RUNNING=1; fi\n"
+	. "    if [ \"\$GAME_RUNNING\" = \"0\" ]; then\n"
+	. "        watchdog_exit_if_stop_requested\n"
+	. "        rm -f game.pid\n"
+	. "        ( cd \"\$GAME_WORKDIR\" && exec bash -lc \"exec \$GAME_COMMAND\" ) >/dev/null 2>&1 &\n"
+	. "        echo \$! > \"\$HOME_PATH/game.pid\"\n"
+	. "        sleep 5\n"
+	. "    fi\n"
+	. "    if [ -n \"\$BOT_WORKDIR\" ] && [ -n \"\$BOT_EXE\" ]; then\n"
+	. "        BOT_RUNNING=0\n"
+	. "        BOT_PID=\"\"\n"
+	. "        if [ -f bot.pid ]; then BOT_PID=\$(cat bot.pid 2>/dev/null); fi\n"
+	. "        if echo \"\$BOT_PID\" | grep -Eq '^[0-9]+$' && kill -0 \"\$BOT_PID\" >/dev/null 2>&1; then BOT_RUNNING=1; fi\n"
+	. "        if [ \"\$BOT_RUNNING\" = \"0\" ]; then\n"
+	. "            watchdog_exit_if_stop_requested\n"
+	. "            rm -f bot.pid\n"
+	. "            ( cd \"\$BOT_WORKDIR\" && exec \"\$BOT_EXE\" \$BOT_ARGS ) >/dev/null 2>&1 &\n"
+	. "            echo \$! > \"\$HOME_PATH/bot.pid\"\n"
+	. "            sleep 3\n"
+	. "        fi\n"
+	. "    fi\n"
+	. "    sleep 60\n"
+	. "done\n";
+
+	print SERV_START_SCRIPT $watchdog_script;
+	close (SERV_START_SCRIPT);
+
+=== UNIVERSAL START ===
+sub universal_start
+{
+	chomp(@_);
+	return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	return universal_start_without_decrypt(decrypt_params(@_));
+}
+
+# Split to two parts because of internal calls.
+sub universal_start_without_decrypt
+{
+	my (
+		$home_id, $home_path, $server_exe, $run_dir,
+		$startup_cmd, $server_port, $server_ip, $cpu, $nice, $preStart, $envVars, $game_key, $console_log
+	   ) = @_;
+
+	if (is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1)
+	{
+		logger "This server is already running (ID: $home_id).";
+		return -14;
+	}
+
+	if (!-e $home_path)
+	{
+		logger "Can't find server's install path [ $home_path ].";
+		return -10;
+	}
+
+	my $owner = SERVER_RUNNER_USER;
+	my $group = SERVER_RUNNER_USER;
+	my $gspAgentGroup = `whoami`;
+
+	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
+	my $status_hint_file = get_status_hint_path($home_id);
+
+	chomp $gspAgentGroup;
+
+	if(defined LINUX_USER_PER_GAME_SERVER && LINUX_USER_PER_GAME_SERVER eq "1"){
+		$owner = "gamehome" . $home_id;
+		$group = `whoami`;
+		chomp $group;
+
+		# Create new user if doesn't exist
+		my $userExists = `id -u $owner`;
+		if(not is_integer($userExists)){
+			logger "User $owner currently doesn't exist... creating user...";
+
+			sudo_exec_without_decrypt("useradd -m $owner");
+			sudo_exec_without_decrypt("usermod -s /bin/bash $owner");
+			sudo_exec_without_decrypt("usermod -a -G \"$owner\" \"$group\"");
+		}
+	}
+
+	# Fix perms on the GSE agent user's homedir so other users can access owned files within this dir.
+	my $fixGSPHomeDirCommand = 'chmod -R ug+rwx $( getent passwd "' . $gspAgentGroup . '" | cut -d: -f6 )';
+	sudo_exec_without_decrypt($fixGSPHomeDirCommand);
+
+	$fixGSPHomeDirCommand = 'find "$( getent passwd "' . $gspAgentGroup . '" | cut -d: -f6 )" -type d -print0 | xargs -0 chmod o+x';
+	sudo_exec_without_decrypt($fixGSPHomeDirCommand);
+
+	# Some game require that we are in the directory where the binary is.
+	my $game_binary_dir = Path::Class::Dir->new($home_path, $run_dir);
+	if ( -e $game_binary_dir && !chdir $game_binary_dir)
+	{
+		logger "Could not change to server binary directory $game_binary_dir.";
+		return -12;
+	}
+
+	# Temporarily unlock the server executable
+	secure_path_without_decrypt('chattr-i', $server_exe);
+
+	# Set ownership on the game home
+	set_path_ownership($owner, $group, $home_path, 1);
+
+	if (!-x $server_exe)
+	{
+		if (!chmod 0775, $server_exe)
+		{
+			logger "The $server_exe file is not executable.";
+			return -13;
+		}
+	}
+
+	if(defined $preStart && $preStart ne ""){
+		# Get it in the format that the startup file can use
+		$preStart = multiline_to_startup_comma_format($preStart);
+	}else{
+		$preStart = "";
+	}
+
+	if(defined $envVars && $envVars ne ""){
+		# Replace variables in the envvars if they exist
+		my @prestartenvvars = split /[\r\n]+/, $envVars;
+		my $envVarStr = "";
+		foreach my $line (@prestartenvvars) {
+			$line = replace_GSP_Env_Vars("", $home_id, $home_path, $line, $game_key);
+			if($line ne ""){
+				logger "Configuring environment variable: $line";
+				$envVarStr .= "$line\n";
+			}
+		}
+
+		if(defined $envVarStr && $envVarStr ne ""){
+			$envVars = $envVarStr;
+		}
+
+		# Get it in the format that the startup file can use
+		$envVars = multiline_to_startup_comma_format($envVars);
+	}else{
+		$envVars = "";
+	}
+
+	# Secure file
+	secure_path_without_decrypt('chattr+i', $server_exe);
+
+	# Create startup file for the server.
+	my $startup_file =
+	  Path::Class::File->new(GAME_STARTUP_DIR, "$server_ip-$server_port");
+	if (open(STARTUP, '>', $startup_file))
+	{
+		print STARTUP
+		  "$home_id,$home_path,$server_exe,$run_dir,$startup_cmd,$server_port,$server_ip,$cpu,$nice,$preStart,$envVars,$game_key,$console_log";
+		logger "Created startup flag for $server_ip-$server_port";
+		close(STARTUP);
+	}
+	else
+	{
+		logger "Cannot create file in " . $startup_file . " : $!";
+	}
+
+	if(defined $preStart && $preStart ne ""){
+		# Get it in the format that the startup file can use
+		$preStart = startup_comma_format_to_multiline($preStart);
+	}else{
+		$preStart = "";
+	}
+
+	if(defined $envVars && $envVars ne ""){
+		# Get it in the format that the startup file can use
+		$envVars = startup_comma_format_to_multiline($envVars);
+	}else{
+		$envVars = "";
+	}
+
+	# Create the startup string.
+	my $file_extension = substr $server_exe, -4;
+	my $cli_bin;
+	my $command;
+	my $run_before_start;
+	prepare_server_content_runtime_without_decrypt($home_path);
+
+	# Replace any GSP compatibility variables found in the command line
+	$startup_cmd = replace_GSP_Env_Vars($screen_id, $home_id, $home_path, $startup_cmd, $game_key);
+
+	if($file_extension eq ".exe" or $file_extension eq ".bat")
+	{
+		$command = "wine $server_exe $startup_cmd";
+
+		if ($cpu ne 'NA')
+		{
+			$command = "taskset -c $cpu wine $server_exe $startup_cmd";
+		}
+
+		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file, $home_path, $game_binary_dir);
+		}else{
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
+		}
+	}
+	elsif($file_extension eq ".jar")
+	{
+		$command = "$startup_cmd";
+
+		if ($cpu ne 'NA')
+		{
+			$command = "taskset -c $cpu $startup_cmd";
+		}
+
+		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, $status_hint_file, $home_path, $game_binary_dir);
+		}else{
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
+		}
+	}
+	else
+	{
+=== STOP ===
+sub stop_server
+{
+	chomp(@_);
+	return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	return stop_server_without_decrypt(decrypt_params(@_));
+}
+
+##### Stop server without decrypt
+### Return 1 when error occurred on decryption.
+### Return 0 on success
+sub stop_server_without_decrypt
+{
+	my ($home_id, $server_ip, $server_port, $control_protocol,
+		$control_password, $control_type, $home_path) = @_;
+
+	my $usedProtocolToStop = 0;
+	write_status_hint($home_id, "STOPPING");
+
+	my $startup_file = Path::Class::File->new(GAME_STARTUP_DIR, "$server_ip-$server_port");
+
+	if (-e $startup_file)
+	{
+		logger "Removing startup flag " . $startup_file . "";
+		unlink($startup_file)
+		  or logger "Cannot remove the startup flag file $startup_file $!";
+	}
+
+	# Some validation checks for the variables.
+	if ($server_ip =~ /^\s*$/ || $server_port < 0 || $server_port > 65535)
+	{
+		logger("Invalid IP:Port given $server_ip:$server_port.");
+		return 1;
+	}
+
+	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
+	my $as_user = find_user_by_screen_id($screen_id);
+	cleanup_server_content_hooks_without_decrypt($home_path, $as_user);
+
+	# Stop the owning screen/watchdog first, then kill the captured game/bot PIDs from the home folder.
+	sudo_exec_without_decrypt('screen -S '.$screen_id.' -X quit', $as_user);
+	sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
+	kill_home_pid_files_without_decrypt($home_path, $as_user);
+
+	if ($control_password !~ /^\s*$/ and $control_protocol ne "")
+	{
+		if ($control_protocol eq "rcon")
+		{
+			use KKrcon::KKrcon;
+			my $rcon = new KKrcon(
+								  Password => $control_password,
+								  Host	 => $server_ip,
+								  Port	 => $server_port,
+								  Type	 => $control_type
+								 );
+
+			my $rconCommand = "quit";
+			$rcon->execute($rconCommand);
+			$usedProtocolToStop = 1;
+		}
+		elsif ($control_protocol eq "rcon2")
+		{
+			use KKrcon::HL2;
+			my $rcon2 = new HL2(
+								  hostname => $server_ip,
+								  port	 => $server_port,
+								  password => $control_password,
+								  timeout  => 2
+								 );
+
+			my $rconCommand = "quit";
+			$rcon2->run($rconCommand);
+			$usedProtocolToStop = 1;
+		}
+		elsif ($control_protocol eq "armabe")
+		{
+			use ArmaBE::ArmaBE;
+			my $armabe = new ArmaBE(
+								  hostname => $server_ip,
+								  port	 => $server_port, # Uses server port for now (Arma 2), Arma 3 BE uses a different, user definable port
+								  password => $control_password,
+								  timeout  => 2
+								 );
+
+			my $rconCommand = "#shutdown";
+			my $armabe_result = $armabe->run($rconCommand);
+			if ($armabe_result) {
+				logger "ArmaBE Shutdown command sent successfully";
+				$usedProtocolToStop = 1;
+			}
+		}
+		elsif ($control_protocol eq "minecraft")
+		{
+			use Minecraft::RCON;
+			my $strip_color = 1;
+
+			my $rconPort = get_minecraft_rcon_port($home_path);
+
+			logger "Minecraft rcon port detected as $rconPort with path of $home_path";
+
+			if ($rconPort != -1){
+				my $minecraft;
+				my $response;
+
+				eval {
+					$minecraft = Minecraft::RCON->new(
+						{
+							address     => $server_ip,
+							port        => $rconPort,
+							password    => $control_password,
+							color_mode  => $strip_color ? 'strip' : 'convert',
+						}
+					);
+				};
+
+				if (defined $minecraft)
+				{
+					eval { $minecraft->connect };
+					logger "Minecraft rcon module connection failed: $@" if $@;
+
+
+					my $rconCommand = "/stop";
+					eval { $response = $minecraft->command($rconCommand) };
+					logger $@ ? "Minecraft rcon error: $@" : "Minecraft rcon module response: $response";
+
+					eval { $minecraft->disconnect; };
+
+					if (defined $response) {
