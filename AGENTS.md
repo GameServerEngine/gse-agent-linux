@@ -1,5 +1,7 @@
 # GameServer Engine (GSE) Workspace Reference
 
+Parent Operating Instructions Version: 1.0.0
+
 This file is the authoritative source of truth for the GameServer Engine (GSE) ecosystem in this workspace.
 
 Location: `/home/dev/Projects/GSP/AGENTS.md`
