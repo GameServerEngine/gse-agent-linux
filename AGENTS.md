@@ -272,3 +272,17 @@ History record path
 Git commits
 
 Remaining work
+
+## Coding Standards
+
+- Fix the root cause. Do not put a patch on top of broken code.
+  If a rule or function is wrong, change that rule or function.
+- CSS: change the rule where it is first written. Do not add a second
+  rule that overrides it.
+- Write the simplest code that works. Use plain steps that a beginner can follow.
+- Use a harder method only when it is really needed. Say why in a comment.
+- Do not write short clever code just to save lines. Clear code is better.
+- Keep each function to one job, and keep functions short.
+- Before you finish, read your change once as if you are new to the project.
+  If it is hard to follow, make it simpler.
+- Never put tokens, passwords, or keys in code, docs, or git history.
