@@ -286,3 +286,21 @@ Remaining work
 - Before you finish, read your change once as if you are new to the project.
   If it is hard to follow, make it simpler.
 - Never put tokens, passwords, or keys in code, docs, or git history.
+
+## Work Tracking
+
+Every repo keeps its open work in `docs/TODO.md`.
+
+- Read `docs/TODO.md` before you start work in this repo.
+- Update it every time you work in this repo. Add anything you find, even if you found it by accident.
+- Use these types:
+  - `todo`: work that must be done.
+  - `issue`: a bug or problem.
+  - `goal`: something the user wants later.
+  - `need`: something you can see will be needed in the future.
+- Keep one row per item. Do not delete rows.
+- When work is done, set Status to `done`. Write who did it in Owner.
+- Set Status to `invalid` only when the item is wrong or no longer needed. Leroy deletes the matching GitLab item during sync.
+- Owner is who did or will do the work: `Claude`, `Codex`, `Leroy`, or the user's name.
+- Commit the `docs/TODO.md` change together with the code change.
+- The user and Leroy review this file. Then Leroy creates or updates the matching GitLab issue or work item and writes its link in the GitLab column.
