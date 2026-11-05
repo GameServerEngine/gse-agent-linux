@@ -43,6 +43,7 @@ use Archive::Extract;	 # Used to handle archived files.
 use File::Find;
 use Schedule::Cron; # Used for scheduling tasks
 use JSON::PP;
+use POSIX ();
 use Digest::SHA qw(hmac_sha256_hex);
 use Sys::Hostname qw(hostname);
 
@@ -760,6 +761,306 @@ if(-e Path::Class::File->new(FD_DIR, 'Settings.pm'))
 	}
 }
 
+	# ---------------------------------------------------------------------------
+	# restic job runner for the panel's self-service backup / restore.
+	#
+	# Secrets (RESTIC_REPOSITORY, RESTIC_PASSWORD) arrive XXTEA-encrypted like every
+	# other RPC parameter and reach restic only through its environment. They never
+	# appear in argv, in the job log, or in any file on disk.
+	#
+	# argv is checked against an allowlist of exact shapes, one per operation the
+	# panel needs. Anything else is refused, so restic's own options (repository,
+	# password files, commands, cache dirs) cannot be reached through this RPC.
+	#
+	# A job runs detached from the RPC request, so a panel timeout does not stop it.
+	# Its state stays in the job directory until the panel reads it. A job whose
+	# supervisor is gone and that has no recorded result is reported as 'lost'.
+	# ---------------------------------------------------------------------------
+	use constant RESTIC_JOB_ROOT    => ($ENV{GSE_RESTIC_JOB_ROOT} || '/var/lib/gse-agent/restic-jobs');
+	use constant RESTIC_OUTPUT_TAIL => 65536;
+
+	my %RESTIC_ENV_KEYS = map { $_ => 1 } qw(RESTIC_REPOSITORY RESTIC_PASSWORD);
+
+	sub restic_job_id_ok
+	{
+		my ($job_id) = @_;
+		return (defined $job_id && $job_id =~ /^[a-f0-9]{32}\z/) ? 1 : 0;
+	}
+
+	sub restic_job_slurp
+	{
+		my ($path) = @_;
+		open(my $fh, '<', $path) or return undef;
+		local $/;
+		my $data = <$fh>;
+		close($fh);
+		return $data;
+	}
+
+	sub restic_job_write_file
+	{
+		my ($path, $data) = @_;
+		open(my $fh, '>', "$path.tmp") or return 0;
+		print $fh $data;
+		close($fh);
+		return rename("$path.tmp", $path) ? 1 : 0;
+	}
+
+	# Start time of a live process from /proc, or undef if it is gone or a zombie.
+	sub restic_pid_start_time
+	{
+		my ($pid) = @_;
+		my $stat = restic_job_slurp("/proc/$pid/stat");
+		return undef unless defined $stat;
+		my ($rest) = $stat =~ /^.*\)\s(.*)\z/s;
+		return undef unless defined $rest;
+		my @fields = split(' ', $rest);
+		return undef if (!@fields || $fields[0] eq 'Z');
+		return $fields[19];
+	}
+
+	sub restic_bin_path
+	{
+		return $ENV{GSE_RESTIC_BIN} if ($ENV{GSE_RESTIC_BIN} && -f $ENV{GSE_RESTIC_BIN} && -x $ENV{GSE_RESTIC_BIN});
+		foreach my $candidate ('/usr/local/bin/restic', '/usr/bin/restic')
+		{
+			return $candidate if (-f $candidate && -x $candidate);
+		}
+		return undef;
+	}
+
+	# Backup paths must be absolute, in canonical form, and outside the root and system trees.
+	# Stopgap: the panel should later pass a home root that the agent checks against.
+	sub restic_arg_abs_path_ok
+	{
+		my ($path) = @_;
+		return 0 unless (defined $path && length($path) <= 4096 && $path =~ m{^/});
+		require File::Spec;
+		# Only the canonical spelling is accepted, so '//', '/./' and trailing slashes
+		# cannot name a different tree than the one checked here.
+		return 0 unless (File::Spec->canonpath($path) eq $path);
+		return 0 if ($path =~ m{(?:^|/)\.\.(?:/|\z)});
+		foreach my $deny ('/', '/etc', '/root', '/boot', '/proc', '/sys', '/dev', '/run',
+						  '/bin', '/sbin', '/lib', '/usr', '/var/lib/gse-agent')
+		{
+			return 0 if ($path eq $deny || ($deny ne '/' && index($path, "$deny/") == 0));
+		}
+		return 1;
+	}
+
+	# The only restic invocations the panel uses. The repository is never an argument:
+	# it comes from RESTIC_REPOSITORY.
+	sub restic_job_argv_ok
+	{
+		my ($argv) = @_;
+		return 0 unless (ref($argv) eq 'ARRAY' && @$argv >= 2 && $argv->[0] eq 'restic');
+		foreach my $arg (@$argv)
+		{
+			return 0 if (!defined($arg) || ref($arg) || $arg =~ /\x00/);
+		}
+		my ($sub, @args) = @$argv[1 .. $#$argv];
+
+		if ($sub eq 'init')
+		{
+			return (@args == 0) ? 1 : 0;
+		}
+		if ($sub eq 'cat')
+		{
+			return (@args == 1 && $args[0] eq 'config') ? 1 : 0;
+		}
+		if ($sub eq 'backup')
+		{
+			return (@args == 6
+				&& restic_arg_abs_path_ok($args[0])
+				&& $args[1] eq '--tag' && ($args[2] eq 'baseline' || $args[2] eq 'customer')
+				&& $args[3] eq '--tag' && $args[4] =~ /^home-[0-9]{1,10}\z/
+				&& $args[5] eq '--json') ? 1 : 0;
+		}
+		if ($sub eq 'restore')
+		{
+			return (@args == 3 && $args[0] =~ /^[a-f0-9]{8,64}\z/
+				&& $args[1] eq '--target' && $args[2] eq '/') ? 1 : 0;
+		}
+		if ($sub eq 'forget')
+		{
+			return 0 unless (@args >= 2 && $args[0] eq '--prune');
+			foreach my $id (@args[1 .. $#args])
+			{
+				return 0 unless ($id =~ /^[a-f0-9]{8,64}\z/);
+			}
+			return 1;
+		}
+		return 0;
+	}
+
+	sub restic_job_env_ok
+	{
+		my ($env) = @_;
+		return 0 unless (ref($env) eq 'HASH');
+		foreach my $key (keys %$env)
+		{
+			return 0 unless ($RESTIC_ENV_KEYS{$key} && defined($env->{$key}) && !ref($env->{$key}));
+		}
+		return (defined $env->{RESTIC_REPOSITORY} && defined $env->{RESTIC_PASSWORD}) ? 1 : 0;
+	}
+
+	# restic_job_start(job_id, argv_json, env_json, check)
+	# Returns "1;" + encode_list(state, ...). state: started | exists | error
+	sub restic_job_start
+	{
+		return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+		my ($job_id, $argv_json, $env_json) = decrypt_params(@_);
+
+		return "1;" . encode_list('error', 'bad_job_id') unless restic_job_id_ok($job_id);
+
+		my $argv = eval { JSON::PP->new->utf8->decode($argv_json) };
+		return "1;" . encode_list('error', 'bad_argv') unless restic_job_argv_ok($argv);
+
+		my $env = eval { JSON::PP->new->utf8->decode($env_json) };
+		return "1;" . encode_list('error', 'bad_env') unless restic_job_env_ok($env);
+
+		my $bin = restic_bin_path();
+		return "1;" . encode_list('error', 'no_restic') unless defined $bin;
+
+		utf8::encode($_) for @$argv;
+		utf8::encode($_) for values %$env;
+
+		mkpath(RESTIC_JOB_ROOT, 0, 0700) unless -d RESTIC_JOB_ROOT;
+		return "1;" . encode_list('error', 'job_root') unless -d RESTIC_JOB_ROOT;
+
+		my $dir = RESTIC_JOB_ROOT . "/$job_id";
+		# mkdir is the claim: only one start can create the job directory.
+		if (!mkdir($dir, 0700))
+		{
+			return "1;" . encode_list(-e $dir ? 'exists' : 'error');
+		}
+
+		my $supervisor = fork();
+		if (!defined $supervisor)
+		{
+			rmdir($dir);
+			return "1;" . encode_list('error', 'fork');
+		}
+
+		if ($supervisor == 0)
+		{
+			# Supervisor: leave the request session, record its own identity, drop the RPC
+			# socket, run restic, record the result.
+			POSIX::setsid();
+			$SIG{CHLD} = 'DEFAULT';
+			my $own_start = restic_pid_start_time($$);
+			restic_job_write_file("$dir/supervisor.pid", "$$ " . (defined $own_start ? $own_start : 'unknown') . "\n");
+			open(STDIN,  '<', '/dev/null');
+			open(STDOUT, '>', '/dev/null');
+			open(STDERR, '>&', \*STDOUT);
+			POSIX::close($_) for (3 .. 255);
+
+			my $worker = fork();
+			POSIX::_exit(1) unless defined $worker;
+
+			if ($worker == 0)
+			{
+				open(STDIN,  '<', '/dev/null');
+				open(STDOUT, '>>', "$dir/output.log");
+				open(STDERR, '>&', \*STDOUT);
+				$SIG{CHLD} = 'DEFAULT';
+				delete $ENV{$_} for grep { /^RESTIC_/ } keys %ENV;
+				$ENV{$_} = $env->{$_} for keys %$env;
+				exec { $bin } @$argv;
+				POSIX::_exit(127);
+			}
+
+			waitpid($worker, 0);
+			my $code = ($? & 127) ? 128 + ($? & 127) : ($? >> 8);
+			restic_job_write_file("$dir/status.json",
+				JSON::PP->new->canonical->encode({ state => 'done', exit => $code + 0, finished => time() }));
+			POSIX::_exit(0);
+		}
+
+		# Answer only once the supervisor's identity is on disk, so the panel never polls
+		# a job that the agent cannot yet recognise.
+		for (1 .. 100)
+		{
+			last if -e "$dir/supervisor.pid";
+			select(undef, undef, undef, 0.05);
+		}
+		if (!-e "$dir/supervisor.pid")
+		{
+			# The supervisor never recorded itself. Stop its whole process group (restic
+			# included), clear the directory, and let the panel retry under a new job id.
+			kill('KILL', $supervisor);
+			kill('KILL', -$supervisor);
+			waitpid($supervisor, 0);
+			File::Path::remove_tree($dir);
+			return "1;" . encode_list('error', 'no_supervisor');
+		}
+		return "1;" . encode_list('started');
+	}
+
+	# restic_job_status(job_id, check)
+	# Returns "1;" + encode_list(state, exit_code, output_tail).
+	# state: running | done | lost | missing
+	sub restic_job_status
+	{
+		return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+		my ($job_id) = decrypt_params(@_);
+
+		return "1;" . encode_list('error', 'bad_job_id') unless restic_job_id_ok($job_id);
+
+		my $dir = RESTIC_JOB_ROOT . "/$job_id";
+		return "1;" . encode_list('missing') unless -d $dir;
+
+		my $read_result = sub {
+			my $raw = restic_job_slurp("$dir/status.json");
+			return undef unless defined $raw;
+			my $parsed = eval { JSON::PP->new->decode($raw) };
+			return (ref($parsed) eq 'HASH') ? $parsed : {};
+		};
+
+		my ($state, $exit_code) = ('running', '');
+		my $result = $read_result->();
+		if (!defined $result)
+		{
+			my $sup = restic_job_slurp("$dir/supervisor.pid");
+			my ($pid, $start) = defined $sup ? split(' ', $sup) : ();
+			my $alive = 0;
+			if (defined $pid && $pid =~ /^\d+\z/ && defined $start && $start =~ /^\d+\z/)
+			{
+				my $now = restic_pid_start_time($pid);
+				$alive = (defined $now && $now eq $start) ? 1 : 0;
+			}
+			if (!$alive)
+			{
+				# The supervisor may have written its result just after the checks above.
+				$result = $read_result->();
+				$state = 'lost' unless defined $result;
+			}
+		}
+		if (defined $result)
+		{
+			$state = 'done';
+			$exit_code = defined $result->{exit} ? $result->{exit} : '';
+		}
+
+		my $output = '';
+		if (-f "$dir/output.log")
+		{
+			my $size = -s "$dir/output.log";
+			my $from = ($size > RESTIC_OUTPUT_TAIL) ? $size - RESTIC_OUTPUT_TAIL : 0;
+			if (open(my $fh, '<', "$dir/output.log"))
+			{
+				seek($fh, $from, 0);
+				local $/;
+				$output = <$fh>;
+				close($fh);
+				$output = '' unless defined $output;
+			}
+		}
+
+		return "1;" . encode_list($state, $exit_code, $output);
+	}
+
+
 my $d = Frontier::Daemon::GSP::Forking->new(
 			 methods => {
 					 is_screen_running				=> \&is_screen_running,
@@ -794,6 +1095,8 @@ my $d = Frontier::Daemon::GSP::Forking->new(
 				 exec						 	=> \&exec,
 				 clone_home				   		=> \&clone_home,
 				 remove_home					=> \&remove_home,
+				 restic_job_start				=> \&restic_job_start,
+				 restic_job_status				=> \&restic_job_status,
 				 start_rsync_install			=> \&start_rsync_install,
 				 rsync_progress			   		=> \&rsync_progress,
 				 restart_server			   		=> \&restart_server,
