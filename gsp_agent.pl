@@ -778,6 +778,8 @@ if(-e Path::Class::File->new(FD_DIR, 'Settings.pm'))
 	# ---------------------------------------------------------------------------
 	use constant RESTIC_JOB_ROOT    => ($ENV{GSE_RESTIC_JOB_ROOT} || '/var/lib/gse-agent/restic-jobs');
 	use constant RESTIC_OUTPUT_TAIL => 65536;
+	# Game server folders live under this root: <root>/<digits>. Set GSE_GAME_HOME_ROOT for another layout.
+	use constant RESTIC_HOME_ROOT   => ($ENV{GSE_GAME_HOME_ROOT} || '/home/gameserver');
 
 	my %RESTIC_ENV_KEYS = map { $_ => 1 } qw(RESTIC_REPOSITORY RESTIC_PASSWORD);
 
@@ -829,22 +831,16 @@ if(-e Path::Class::File->new(FD_DIR, 'Settings.pm'))
 		return undef;
 	}
 
-	# Backup paths must be absolute, in canonical form, and outside the root and system trees.
-	# Stopgap: the panel should later pass a home root that the agent checks against.
-	sub restic_arg_abs_path_ok
+	# Paths restic may touch: a game server folder (<home root>/<digits>) or a path inside one.
+	# Same rule as the Windows agent: canonical form only, no '.' or '..' segments.
+	sub restic_arg_home_path_ok
 	{
 		my ($path) = @_;
-		return 0 unless (defined $path && length($path) <= 4096 && $path =~ m{^/});
-		require File::Spec;
-		# Only the canonical spelling is accepted, so '//', '/./' and trailing slashes
-		# cannot name a different tree than the one checked here.
-		return 0 unless (File::Spec->canonpath($path) eq $path);
-		return 0 if ($path =~ m{(?:^|/)\.\.(?:/|\z)});
-		foreach my $deny ('/', '/etc', '/root', '/boot', '/proc', '/sys', '/dev', '/run',
-						  '/bin', '/sbin', '/lib', '/usr', '/var/lib/gse-agent')
-		{
-			return 0 if ($path eq $deny || ($deny ne '/' && index($path, "$deny/") == 0));
-		}
+		return 0 unless (defined $path && length($path) <= 4096);
+		my $root = RESTIC_HOME_ROOT;
+		return 0 unless ($root =~ m{\A/[^/\x00-\x1f]+(?:/[^/\x00-\x1f]+)*\z} && $root !~ m{(?:\A|/)\.\.?(?:/|\z)});
+		return 0 unless ($path =~ m{\A\Q$root\E/[0-9]{1,10}(?:/[^/\x00-\x1f]+)*\z});
+		foreach my $seg (split m{/}, $path) { return 0 if ($seg eq '.' || $seg eq '..'); }
 		return 1;
 	}
 
@@ -870,16 +866,26 @@ if(-e Path::Class::File->new(FD_DIR, 'Settings.pm'))
 		}
 		if ($sub eq 'backup')
 		{
-			return (@args == 6
-				&& restic_arg_abs_path_ok($args[0])
-				&& $args[1] eq '--tag' && ($args[2] eq 'baseline' || $args[2] eq 'customer')
-				&& $args[3] eq '--tag' && $args[4] =~ /^home-[0-9]{1,10}\z/
-				&& $args[5] eq '--json') ? 1 : 0;
+			# backup <game folder> --exclude <game folder>/restic-restore --tag <kind> --tag home-N --json
+			# The exclude keeps restore staging out of the next backup.
+			return (@args == 8
+				&& restic_arg_home_path_ok($args[0])
+				&& $args[1] eq '--exclude' && $args[2] eq $args[0] . '/restic-restore'
+				&& $args[3] eq '--tag' && ($args[4] eq 'baseline' || $args[4] eq 'customer')
+				&& $args[5] eq '--tag' && $args[6] =~ /^home-[0-9]{1,10}\z/
+				&& $args[7] eq '--json') ? 1 : 0;
 		}
 		if ($sub eq 'restore')
 		{
-			return (@args == 3 && $args[0] =~ /^[a-f0-9]{8,64}\z/
-				&& $args[1] eq '--target' && $args[2] eq '/') ? 1 : 0;
+			# restore <snapshot> [--include <game folder path>] --target <game folder path>
+			return 0 unless (@args >= 3 && $args[0] =~ /^[a-f0-9]{8,64}\z/);
+			my @rest = @args[1 .. $#args];
+			if (@rest && $rest[0] eq '--include')
+			{
+				return 0 unless (@rest >= 2 && restic_arg_home_path_ok($rest[1]));
+				splice(@rest, 0, 2);
+			}
+			return (@rest == 2 && $rest[0] eq '--target' && restic_arg_home_path_ok($rest[1])) ? 1 : 0;
 		}
 		if ($sub eq 'forget')
 		{

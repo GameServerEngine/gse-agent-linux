@@ -42,6 +42,7 @@ required_packages=(
 	git
 	curl
 	ca-certificates
+	bzip2
 	pure-ftpd
 	libc6
 )
@@ -78,6 +79,41 @@ if [[ "$install_i386" =~ ^[Yy]([Ee][Ss])?$ ]]; then
 		fi
 	done
 fi
+
+# restic for customer backups: pinned release, checked against the upstream SHA256SUMS value.
+# Set RESTIC_OFFLINE_BZ2 to a local copy of the release file for an offline install.
+RESTIC_VERSION=0.19.1
+RESTIC_BZ2_SHA256=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
+RESTIC_BZ2_URL="https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_amd64.bz2"
+RESTIC_INSTALL_PATH="${RESTIC_INSTALL_PATH:-/usr/local/bin/restic}"
+
+install_restic()
+{
+	if [ -x "$RESTIC_INSTALL_PATH" ] && "$RESTIC_INSTALL_PATH" version 2>/dev/null | grep -q "restic ${RESTIC_VERSION} "; then
+	    echo "restic ${RESTIC_VERSION} is already installed at ${RESTIC_INSTALL_PATH}."
+	    return 0
+	fi
+	local work
+	work="$(mktemp -d)"
+	if [ -n "${RESTIC_OFFLINE_BZ2:-}" ]; then
+	    cp "$RESTIC_OFFLINE_BZ2" "$work/restic.bz2" || return 1
+	else
+	    curl -fsSL --retry 3 --connect-timeout 20 -o "$work/restic.bz2" "$RESTIC_BZ2_URL" || { rm -rf "$work"; echo "Could not download restic from ${RESTIC_BZ2_URL}." >&2; return 1; }
+	fi
+	if ! echo "${RESTIC_BZ2_SHA256}  ${work}/restic.bz2" | sha256sum -c - >/dev/null 2>&1; then
+	    rm -rf "$work"
+	    echo "The restic download does not match the pinned sha256. Nothing was installed." >&2
+	    return 1
+	fi
+	bunzip2 -c "$work/restic.bz2" > "$work/restic" || { rm -rf "$work"; return 1; }
+	install -m 755 "$work/restic" "$RESTIC_INSTALL_PATH" || { rm -rf "$work"; return 1; }
+	rm -rf "$work"
+	"$RESTIC_INSTALL_PATH" version | head -n 1
+}
+
+echo
+echo "Installing restic ${RESTIC_VERSION} for customer backups."
+install_restic || { echo "restic install failed." >&2; exit 1; }
 
 cat <<'EOF'
 
