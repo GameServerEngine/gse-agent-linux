@@ -8,7 +8,7 @@ $db = [
   'pass' => 'CHANGE_ME_DB_PASSWORD',
   'name' => 'panel'
 ];
-$TABLE_PREFIX = 'gsp_';
+$TABLE_PREFIX = '';
 $AUTO_REFRESH_SECONDS = 30; // set 0 to disable auto-refresh
 /***************************************/
 

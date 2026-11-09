@@ -222,15 +222,15 @@ sub prepare_server_content_runtime_without_decrypt
 	my ($home_path) = @_;
 	return if(!defined($home_path) || $home_path eq "");
 	foreach my $dir (
-		"$home_path/_game_content",
-		"$home_path/_game_content/hooks",
-		"$home_path/_game_content/generated",
-		"$home_path/_game_content/runtime"
+		game_content_dir($home_path) . "",
+		game_content_dir($home_path) . "/hooks",
+		game_content_dir($home_path) . "/generated",
+		game_content_dir($home_path) . "/runtime"
 	)
 	{
 		mkpath($dir) if(!-d $dir);
 	}
-	my $pid_file = "$home_path/_game_content/runtime/server_content.pids";
+	my $pid_file = game_content_dir($home_path) . "/runtime/server_content.pids";
 	if(!-e $pid_file && open(my $fh, '>', $pid_file))
 	{
 		close($fh);
@@ -255,7 +255,7 @@ sub import_legacy_also_run_pids_without_decrypt
 	my ($home_path) = @_;
 	return if(!defined($home_path) || $home_path eq "");
 	prepare_server_content_runtime_without_decrypt($home_path);
-	my $pid_file = "$home_path/_game_content/runtime/server_content.pids";
+	my $pid_file = game_content_dir($home_path) . "/runtime/server_content.pids";
 	my %seen;
 	foreach my $legacy_pid_file ("$home_path/_alsoRun.pid", bsd_glob("$home_path/*/_alsoRun.pid"))
 	{
@@ -324,7 +324,7 @@ sub cleanup_server_content_hooks_without_decrypt
 	my ($home_path, $as_user) = @_;
 	return if(!defined($home_path) || $home_path eq "");
 	import_legacy_also_run_pids_without_decrypt($home_path);
-	my $pid_file = "$home_path/_game_content/runtime/server_content.pids";
+	my $pid_file = game_content_dir($home_path) . "/runtime/server_content.pids";
 	cleanup_server_content_pid_group_without_decrypt($pid_file, "watchdog", $as_user);
 	cleanup_server_content_pid_group_without_decrypt($pid_file, "app", $as_user);
 }
@@ -1287,7 +1287,7 @@ sub get_home_pids
 sub create_screen_id
 {
 	my ($screen_type, $home_id) = @_;
-	return sprintf("GSP_%s_%09d", $screen_type, $home_id);
+	return sprintf("SCREEN_%s_%09d", $screen_type, $home_id);
 }
 
 sub create_screen_cmd
@@ -1525,9 +1525,21 @@ sub handle_lock_command_line{
 	return 0;
 }
 
+sub game_content_dir {
+	my ($home_path) = @_;
+	my $new = "$home_path/_game_content";
+	my $old = "$home_path/_gsp_content";
+	return (!-d $new && -d $old) ? $old : $new;
+}
+
 sub replace_Env_Vars{
 	# This function replaces constants from environment variables set in the XML
 	my ($screen_id, $homeid, $homepath, $exec_cmd, $game_key) = @_;
+	# Accept legacy {GSP_*} token names from older panel templates.
+	if (defined $exec_cmd) {
+		$exec_cmd =~ s/\{GSP_(HOME_[A-Z_]*)\}/"{GAME_$1}"/ge;
+		$exec_cmd =~ s/\{GSP_([A-Z_]+)\}/{$1}/g;
+	}
 
 	# Handle steam specific replacements
 	if(defined $screen_id && $screen_id ne ""){
@@ -2694,11 +2706,11 @@ sub universal_start_without_decrypt
 
 	my $owner = SERVER_RUNNER_USER;
 	my $group = SERVER_RUNNER_USER;
-	my $gspAgentGroup = `whoami`;
+	my $agentGroup = `whoami`;
 
 	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
 
-	chomp $gspAgentGroup;
+	chomp $agentGroup;
 
 	if(defined LINUX_USER_PER_GAME_SERVER && LINUX_USER_PER_GAME_SERVER eq "1"){
 		$owner = "gamehome" . $home_id;
@@ -2724,11 +2736,11 @@ sub universal_start_without_decrypt
 	}
 
 	# Fix perms on the GSE agent user's homedir so other users can access owned files within this dir.
-	my $fixGSPHomeDirCommand = 'chmod -R ug+rwx $( getent passwd "' . $gspAgentGroup . '" | cut -d: -f6 )';
-	sudo_exec_without_decrypt($fixGSPHomeDirCommand);
+	my $fixHomeDirCommand = 'chmod -R ug+rwx $( getent passwd "' . $agentGroup . '" | cut -d: -f6 )';
+	sudo_exec_without_decrypt($fixHomeDirCommand);
 
-	$fixGSPHomeDirCommand = 'find "$( getent passwd "' . $gspAgentGroup . '" | cut -d: -f6 )" -type d -print0 | xargs -0 chmod o+x';
-	sudo_exec_without_decrypt($fixGSPHomeDirCommand);
+	$fixHomeDirCommand = 'find "$( getent passwd "' . $agentGroup . '" | cut -d: -f6 )" -type d -print0 | xargs -0 chmod o+x';
+	sudo_exec_without_decrypt($fixHomeDirCommand);
 
 	# Some game require that we are in the directory where the binary is.
 	my ($payload_path_ok, $game_binary_dir, $payload_path_error) = resolve_game_payload_path_without_decrypt($home_path, $game_key, $run_dir);
@@ -3981,7 +3993,7 @@ sub multiline_to_startup_comma_format{
 	my ($multiLineVar) = @_;
 	$multiLineVar =~ s/,//g; # commas are invalid anyways in bash
 	$multiLineVar =~ s/[\r]+//g;
-	$multiLineVar =~ s/[\n]+/{GSPNEWLINE}/g;
+	$multiLineVar =~ s/[\n]+/{NEWLINE_TOKEN}/g;
 	return $multiLineVar;
 }
 
@@ -3993,7 +4005,7 @@ sub multiline_to_bash_commands{
 
 sub startup_comma_format_to_multiline{
 	my ($multiLineVar) = @_;
-	$multiLineVar =~ s/{GSPNEWLINE}/\n/g;
+	$multiLineVar =~ s/{NEWLINE_TOKEN}/\n/g;
 	return $multiLineVar;
 }
 
@@ -5006,7 +5018,7 @@ sub submit_resource_stats_to_db
 sub create_resource_stats_tables
 {
 	my ($dbh) = @_;
-	my $table_prefix = STATS_TABLE_PREFIX || 'gsp_';
+	my $table_prefix = STATS_TABLE_PREFIX || '';
 
 	# Create agent_machines table
 	my $machines_sql = qq{
@@ -5112,7 +5124,7 @@ sub get_local_ip
 sub ensure_machine_registered
 {
 	my ($dbh, $machine_id, $hostname, $ip) = @_;
-	my $table_prefix = STATS_TABLE_PREFIX || 'gsp_';
+	my $table_prefix = STATS_TABLE_PREFIX || '';
 
 	# Check if machine exists, if not insert it
 	my $check_sql = "SELECT id FROM `${table_prefix}machines` WHERE machine_id = ?";
@@ -5182,7 +5194,7 @@ sub insert_machine_sample
 	    $swap_used, $swap_total, $disk_path, $disk_total, $disk_used, $disk_percent,
 	    $net_iface, $rx_bytes, $tx_bytes, $iface_speed, $load_1min, $load_5min, $load_15min) = @_;
 
-	my $table_prefix = STATS_TABLE_PREFIX || 'gsp_';
+	my $table_prefix = STATS_TABLE_PREFIX || '';
 
 	my $insert_sql = qq{
 		INSERT INTO `${table_prefix}machine_samples` (
@@ -5206,7 +5218,7 @@ sub insert_machine_sample
 sub collect_and_insert_process_samples
 {
 	my ($dbh, $machine_id) = @_;
-	my $table_prefix = STATS_TABLE_PREFIX || 'gsp_';
+	my $table_prefix = STATS_TABLE_PREFIX || '';
 
 	# Get list of running game server processes (screen sessions and their child processes)
 	my @processes = ();
@@ -5253,7 +5265,7 @@ sub collect_and_insert_process_samples
 			} else {
 				$server_name = "GameServer_Home_$home_id";  # Fallback to home_id
 			}
-		} elsif ($session =~ /GSP_\w+_(.+)/) {
+		} elsif ($session =~ /^(?:GSP_|SCREEN_)\w+_(.+)/) {
 			$server_name = $1;
 		} elsif ($session =~ /(\d+)\.(.+)/) {
 			$server_name = $2;

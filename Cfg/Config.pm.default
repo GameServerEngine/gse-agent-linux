@@ -15,6 +15,6 @@
 	stats_db_user => '',
 	stats_db_pass => '',
 	stats_db_name => '',
-	stats_table_prefix => 'gsp_',
+	stats_table_prefix => '',
 	stats_frequency_minutes => '5',
 );
