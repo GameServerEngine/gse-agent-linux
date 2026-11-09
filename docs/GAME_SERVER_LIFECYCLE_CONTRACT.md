@@ -83,7 +83,7 @@ status classification no longer use them as lifecycle control state.
 
 Actual runtime state must be proven from live evidence:
 
-- exact screen session `GSP_HOME_<home_id zero-padded to 9 digits>`
+- exact screen session `GAME_HOME_<home_id zero-padded to 9 digits>`
 - `watchdog.pid`
 - `bot.pid`, when a bot is configured or has been launched
 - `game.pid`
@@ -96,12 +96,12 @@ records, or legacy status hints as proof of actual runtime.
 
 ## Current Linux Implementation Map
 
-The current Linux lifecycle is concentrated in `gsp_agent.pl`.
+The current Linux lifecycle is concentrated in `agent_core.pl`.
 
 | Concern | Current evidence |
 | --- | --- |
-| Agent-root runtime constants | `GAME_STARTUP_DIR` is `startups/`, `SERVER_RUNTIME_DIR` is `runtime_status/`, `SCREEN_LOGS_DIR` is `screenlogs/`, and `SCREENRC_FILE` is `gsp_screenrc` near lines 95-112. |
-| Server Content runtime | `prepare_server_content_runtime_without_decrypt` creates `_gsp_content/hooks`, `_gsp_content/generated`, `_gsp_content/runtime`, and `_gsp_content/runtime/server_content.pids` under the current home path near lines 219-237. |
+| Agent-root runtime constants | `GAME_STARTUP_DIR` is `startups/`, `SERVER_RUNTIME_DIR` is `runtime_status/`, `SCREEN_LOGS_DIR` is `screenlogs/`, and `SCREENRC_FILE` is `screen_config` near lines 95-112. |
+| Server Content runtime | `prepare_server_content_runtime_without_decrypt` creates `_game_content/hooks`, `_game_content/generated`, `_game_content/runtime`, and `_game_content/runtime/server_content.pids` under the current home path near lines 219-237. |
 | Legacy helper PID import | `import_legacy_also_run_pids_without_decrypt` reads `_alsoRun.pid` at the home root and one level below, then imports PIDs into `server_content.pids` near lines 252-276. |
 | Server Content cleanup | `cleanup_server_content_hooks_without_decrypt` kills `watchdog` role PIDs before `app` role PIDs near lines 321-330. |
 | Automatic startup replay | Agent startup reads `startups/<ip>-<port>` records and skips `status-`/`pid-` marker-like files near lines 616-696. |
@@ -128,11 +128,11 @@ The current Linux code creates or consumes these lifecycle-related artifacts.
 | Artifact | Current location | Target status |
 | --- | --- | --- |
 | `serverStart.sh` | `management_home` | Keep as the one regenerated readable watchdog script directly owned by the named screen. |
-| `GSP_HOME_<id>_startup_scr.sh` | Legacy agent current directory at Start time | Cleanup-only obsolete file; new Starts do not generate it. |
+| `GAME_HOME_<id>_startup_scr.sh` | Legacy agent current directory at Start time | Cleanup-only obsolete file; new Starts do not generate it. |
 | `startups/<ip>-<port>` | Agent root | Keep only as persistent automatic-start registration. It is not desired state or actual state. |
 | `startups/status-<home_id>` | Agent root | Legacy cleanup-only file. Active lifecycle paths no longer write or read it. |
 | `runtime_status/pid-<home_id>.kv` | Agent root | Temporary compatibility status/cleanup reader only until direct PID evidence is authoritative. |
-| `screenlogs/screenlog.GSP_HOME_<id>` | Agent root | Keep outside `game_root`. |
+| `screenlogs/screenlog.GAME_HOME_<id>` | Agent root | Keep outside `game_root`. |
 | `watchdog.pid` | Current management home | Keep in `management_home`; kill before bot/game. |
 | `bot.pid` | Current home path | Keep in `management_home`; kill before game after watchdog/screen are targeted. |
 | `game.pid` | Current home path | Keep in `management_home`. |
@@ -140,21 +140,21 @@ The current Linux code creates or consumes these lifecycle-related artifacts.
 | `_alsoRun.cmd` | Legacy home path | Compatibility reader only during cleanup/transition; new Starts do not read or generate it. |
 | `_alsoRun.pid` | Home root or one level below | Compatibility cleanup reader only. |
 | `_alsoRun.bat` | Home path cleanup target | Do not generate; cleanup-only stale file. |
-| `_gsp_content/hooks` | Current home path | Must live under `management_home`, not `game_root`. |
-| `_gsp_content/generated` | Current home path | Must live under `management_home`, not `game_root`. |
-| `_gsp_content/runtime/server_content.pids` | Current home path | Keep as management PID registry under `management_home`; never store main game watchdog/game PIDs here. |
+| `_game_content/hooks` | Current home path | Must live under `management_home`, not `game_root`. |
+| `_game_content/generated` | Current home path | Must live under `management_home`, not `game_root`. |
+| `_game_content/runtime/server_content.pids` | Current home path | Keep as management PID registry under `management_home`; never store main game watchdog/game PIDs here. |
 | `prestart_ogp.sh` | Current home path from `run_before_start_commands` | Management script; keep in `management_home` or replace with a safer generated name there. |
 | `secure.sh`, `preinstall.sh`, `postinstall.sh`, `runinstall.sh` | Agent temp `tmp/home_id_<home_id>/` for update/install jobs | Management scripts; do not write them into game payload roots. |
 
 Legacy files no longer generated by the active Start path:
 
-- `GSP_HOME_<id>_startup_scr.sh` as an agent-root watchdog
+- `GAME_HOME_<id>_startup_scr.sh` as an agent-root watchdog
 - `_alsoRun.cmd` as the active bot definition
 - `_alsoRun.bat`
 - `startups/status-<home_id>`
 - any `STARTING`, `STOPPING`, `FORCE_STOPPING`, or `STOPPED` hint as active
   lifecycle state
-- any management-only `_gsp_content` directory beneath `game_root`
+- any management-only `_game_content` directory beneath `game_root`
 
 Temporary cleanup-only compatibility readers:
 
@@ -163,7 +163,7 @@ Temporary cleanup-only compatibility readers:
 - old `watchdog.pid`, `bot.pid`, and `game.pid` from a former home layout
 - `runtime_status/pid-<home_id>.kv`
 - `startups/status-<home_id>`
-- existing `_gsp_content/runtime/server_content.pids`
+- existing `_game_content/runtime/server_content.pids`
 
 Compatibility readers must not recreate legacy files or treat them as primary
 state.
@@ -215,7 +215,7 @@ marked stopped.
 Linux screen launch target:
 
 ```text
-screen -d -m -t "GSP_HOME_<id>" -c <screenrc> -S GSP_HOME_<id> bash <management_home>/serverStart.sh
+screen -d -m -t "GAME_HOME_<id>" -c <screenrc> -S GAME_HOME_<id> bash <management_home>/serverStart.sh
 ```
 
 No extra generated screen-launch wrapper should remain in the active path.
@@ -347,7 +347,7 @@ coordinated Panel, Windows, and Linux lifecycle release:
 1. Create a new disposable home with `management_home=/home/gameserver/GSP/ServerFiles/<id>` and `game_root=<management_home>/<game_key>`.
 2. Install or copy a tiny test server payload under `game_root`; leave `management_home` containing only management artifacts.
 3. Start from the Panel and verify exactly one `serverStart.sh`, one `watchdog.pid`, one `game.pid`, and one `status.running` exist in `management_home`, while none of those files exist beneath `game_root`.
-4. Change a launch option and Start or Restart again; verify `serverStart.sh` timestamp/content changes and only one named `GSP_HOME_<id>` screen remains.
+4. Change a launch option and Start or Restart again; verify `serverStart.sh` timestamp/content changes and only one named `GAME_HOME_<id>` screen remains.
 5. Bind the assigned TCP and UDP port with disposable processes under the same test home, then Start; verify preflight kills those safe owners before launch.
 6. Bind the assigned port with an unrelated protected or ambiguous process and confirm Start/Force Stop returns a structured failure without killing it.
 7. Stop, Force Stop, and Restart from the Panel; after each terminal stop state verify the screen, watchdog, game, optional bot, and TCP/UDP port owners are absent.

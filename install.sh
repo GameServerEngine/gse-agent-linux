@@ -4,7 +4,7 @@ set -euo pipefail
 
 DEFAULT_INSTALL_DIR="/home/gameserver/GSP"
 DEFAULT_AGENT_USER="gameserver"
-DEFAULT_SERVICE_NAME="gsp_agent"
+DEFAULT_SERVICE_NAME="agent_core"
 DEFAULT_REPO_URL="https://git.runlevelsystems.com/GSE/Agent-Linux"
 DEFAULT_REPO_BRANCH="unstable"
 DEFAULT_SOURCE_PATH="."
@@ -120,31 +120,31 @@ validate_repo_settings() {
 validate_staged_payload() {
 	local source_dir="$1"
 	[ -d "$source_dir" ] || fail "Source path does not exist in clone: $source_dir"
-	[ -s "$source_dir/gsp_agent.pl" ] || fail "Source path is missing gsp_agent.pl: $source_dir"
-	[ -s "$source_dir/gsp_agent_run" ] || fail "Source path is missing gsp_agent_run: $source_dir"
+	[ -s "$source_dir/agent_core.pl" ] || fail "Source path is missing agent_core.pl: $source_dir"
+	[ -s "$source_dir/agent_core_run" ] || fail "Source path is missing agent_core_run: $source_dir"
 	[ -s "$source_dir/agent_conf.sh" ] || fail "Source path is missing agent_conf.sh: $source_dir"
 	[ -s "$source_dir/install.sh" ] || fail "Source path is missing install.sh: $source_dir"
 	[ -s "$source_dir/install_agent_prereqs.sh" ] || fail "Source path is missing install_agent_prereqs.sh: $source_dir"
-	[ -s "$source_dir/systemd/gsp_agent.service" ] || fail "Source path is missing systemd/gsp_agent.service: $source_dir"
+	[ -s "$source_dir/systemd/agent_core.service" ] || fail "Source path is missing systemd/agent_core.service: $source_dir"
 	validate_steamcmd_bootstrap "$source_dir"
 
-	(cd "$source_dir" && perl -c gsp_agent.pl >/dev/null) || fail "Staged gsp_agent.pl failed Perl syntax validation."
+	(cd "$source_dir" && perl -c agent_core.pl >/dev/null) || fail "Staged agent_core.pl failed Perl syntax validation."
 	bash -n "$source_dir/install.sh" || fail "Staged install.sh failed Bash syntax validation."
 	bash -n "$source_dir/install_agent_prereqs.sh" || fail "Staged install_agent_prereqs.sh failed Bash syntax validation."
 	bash -n "$source_dir/agent_conf.sh" || fail "Staged agent_conf.sh failed Bash syntax validation."
-	bash -n "$source_dir/gsp_agent_run" || fail "Staged gsp_agent_run failed Bash syntax validation."
+	bash -n "$source_dir/agent_core_run" || fail "Staged agent_core_run failed Bash syntax validation."
 }
 
 validate_installed_payload() {
 	local install_dir="$1"
-	[ -s "$install_dir/gsp_agent.pl" ] || fail "Installed gsp_agent.pl is missing or empty."
-	[ -s "$install_dir/gsp_agent_run" ] || fail "Installed gsp_agent_run is missing or empty."
+	[ -s "$install_dir/agent_core.pl" ] || fail "Installed agent_core.pl is missing or empty."
+	[ -s "$install_dir/agent_core_run" ] || fail "Installed agent_core_run is missing or empty."
 	validate_steamcmd_bootstrap "$install_dir"
-	(cd "$install_dir" && perl -c gsp_agent.pl >/dev/null) || fail "Installed gsp_agent.pl failed Perl syntax validation."
+	(cd "$install_dir" && perl -c agent_core.pl >/dev/null) || fail "Installed agent_core.pl failed Perl syntax validation."
 	bash -n "$install_dir/install.sh" || fail "Installed install.sh failed Bash syntax validation."
 	bash -n "$install_dir/install_agent_prereqs.sh" || fail "Installed install_agent_prereqs.sh failed Bash syntax validation."
 	bash -n "$install_dir/agent_conf.sh" || fail "Installed agent_conf.sh failed Bash syntax validation."
-	bash -n "$install_dir/gsp_agent_run" || fail "Installed gsp_agent_run failed Bash syntax validation."
+	bash -n "$install_dir/agent_core_run" || fail "Installed agent_core_run failed Bash syntax validation."
 }
 
 validate_steamcmd_bootstrap() {
@@ -194,12 +194,12 @@ install_service() {
 		return 0
 	fi
 
-	cp "${install_dir}/systemd/gsp_agent.service" "$unit_path"
+	cp "${install_dir}/systemd/agent_core.service" "$unit_path"
 	sed -i \
-		-e "s#{GSP_AGENT_PATH}#${install_dir}#g" \
-		-e "s#{GSP_AGENT_USER}#${agent_user}#g" \
-		-e "s#{GSP_AGENT_RUN_SCRIPT}#${install_dir}/gsp_agent_run#g" \
-		-e "s#{GSP_AGENT_PID_FILE}#${install_dir}/gsp_agent_run.pid#g" \
+		-e "s#{AGENT_PATH}#${install_dir}#g" \
+		-e "s#{AGENT_USER}#${agent_user}#g" \
+		-e "s#{AGENT_RUN_SCRIPT}#${install_dir}/agent_core_run#g" \
+		-e "s#{AGENT_PID_FILE}#${install_dir}/agent_core_run.pid#g" \
 		"$unit_path"
 
 	systemctl daemon-reload
@@ -286,9 +286,9 @@ remove_managed_agent_files() {
 	)
 	local managed_files=(
 		COPYING DEVELOPMENT README.md agent_conf.sh extPatterns.txt
-		gsp_agent.pl gsp_agent_run gsp_screenrc gsp_screenrc_bk
+		agent_core.pl agent_core_run screen_config screen_config_bk
 		install.sh install_agent_prereqs.sh resource_usage_test.pl
-		.gsp_agent_source_revision
+		.agent_core_source_revision
 	)
 
 	if [ "$DRY_RUN" -eq 1 ]; then
@@ -342,10 +342,10 @@ ensure_runtime_dirs() {
 		"${install_dir}/screenlogs" \
 		"${install_dir}/runtime_status" \
 		"${install_dir}/events" \
-		"${install_dir}/_gsp_content/hooks" \
-		"${install_dir}/_gsp_content/generated" \
-		"${install_dir}/_gsp_content/runtime"
-	touch "${install_dir}/_gsp_content/runtime/server_content.pids"
+		"${install_dir}/_game_content/hooks" \
+		"${install_dir}/_game_content/generated" \
+		"${install_dir}/_game_content/runtime"
+	touch "${install_dir}/_game_content/runtime/server_content.pids"
 }
 
 configure_agent() {
@@ -480,11 +480,11 @@ if [ "$MODE" != "reconfigure" ]; then
 	SRC_DIR="${TMP_DIR}/repo/${SOURCE_PATH#./}"
 	copy_agent_tree "$SRC_DIR" "$INSTALL_DIR"
 	REVISION="$(source_revision "$TMP_DIR/repo")"
-	printf '%s\n' "$REVISION" > "${INSTALL_DIR}/.gsp_agent_source_revision"
+	printf '%s\n' "$REVISION" > "${INSTALL_DIR}/.agent_core_source_revision"
 fi
 
 ensure_runtime_dirs "$INSTALL_DIR"
-chmod +x "${INSTALL_DIR}/gsp_agent_run" "${INSTALL_DIR}/agent_conf.sh" "${INSTALL_DIR}/install_agent_prereqs.sh" 2>/dev/null || true
+chmod +x "${INSTALL_DIR}/agent_core_run" "${INSTALL_DIR}/agent_conf.sh" "${INSTALL_DIR}/install_agent_prereqs.sh" 2>/dev/null || true
 chown -R "${AGENT_USER}:${AGENT_USER}" "$INSTALL_DIR"
 
 if [ "$MODE" = "install" ] || [ ! -f "${INSTALL_DIR}/Cfg/Config.pm" ] || [ ! -f "${INSTALL_DIR}/Cfg/Preferences.pm" ] || [ ! -f "${INSTALL_DIR}/Cfg/bash_prefs.cfg" ]; then
@@ -514,14 +514,14 @@ Config files:
   ${INSTALL_DIR}/Cfg/bash_prefs.cfg
 
 Logs:
-  ${INSTALL_DIR}/gsp_agent.log
+  ${INSTALL_DIR}/agent_core.log
   ${INSTALL_DIR}/screenlogs/
 
 Useful commands:
   sudo systemctl status ${SERVICE_NAME}
   sudo journalctl -u ${SERVICE_NAME} -f
-  tail -f ${INSTALL_DIR}/gsp_agent.log
-  cd ${INSTALL_DIR} && ./gsp_agent_run --log-stdout
+  tail -f ${INSTALL_DIR}/agent_core.log
+  cd ${INSTALL_DIR} && ./agent_core_run --log-stdout
 
 Panel configuration still required:
   1. Add or edit the remote server in the GSE Panel.

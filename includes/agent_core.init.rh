@@ -8,9 +8,9 @@
 #   chkconfig: 2345 88 10
 #   description: Startup/shutdown script for the GSE Agent
 
-agent_dir=GSP_AGENT_DIR
-agent_user=GSP_USER
-service=gsp_agent
+agent_dir=AGENT_DIR
+agent_user=AGENT_USER
+service=agent_core
 
 # Source function library.
 if [ -f /etc/rc.d/init.d/functions ] ; then
@@ -23,7 +23,7 @@ if [ "$( whoami )" != "root" ]
 then
 	if [ -f "/usr/bin/sudo" ] && [ "$( groups $agent_user | grep "\bsudo\b" )" != "" ]
 	then
-		sudo /etc/init.d/gsp_agent ${1:-''}
+		sudo /etc/init.d/agent_core ${1:-''}
 		exit
 	else
 		echo "Permission denied."
@@ -33,8 +33,8 @@ fi
 
 start() {
 	echo -n "Starting GSE Agent: "
-	if [ -e "$agent_dir/gsp_agent_run.pid" ]; then
-		PID=`cat $agent_dir/gsp_agent_run.pid`
+	if [ -e "$agent_dir/agent_core_run.pid" ]; then
+		PID=`cat $agent_dir/agent_core_run.pid`
 		RET=$(kill -s 0 $PID &> /dev/null; echo $?)
 		if [ $RET -eq 0 ]; then
 			echo -n "already running."
@@ -100,12 +100,12 @@ start() {
 	fi
 	
 	cd $agent_dir
-	su -c "screen -d -m -t gsp_agent -c gsp_screenrc -S gsp_agent ./gsp_agent_run -pidfile gsp_agent_run.pid" $agent_user &> $agent_dir/gsp_agent.svc &
+	su -c "screen -d -m -t agent_core -c screen_config -S agent_core ./agent_core_run -pidfile agent_core_run.pid" $agent_user &> $agent_dir/agent_core.svc &
 	echo -n "started successfully."
 	bold=`tput bold`
 	normal=`tput sgr0`
 	echo
-	echo "Use ${bold}sudo su -c 'screen -S gsp_agent -r' $agent_user${normal} to attach the agent screen,"
+	echo "Use ${bold}sudo su -c 'screen -S agent_core -r' $agent_user${normal} to attach the agent screen,"
 	echo "and ${bold}ctrl+A+D${normal} to detach it."
 	return 0
 }
@@ -113,9 +113,9 @@ start() {
 stop() {
 	# Stop daemon
 	echo -n "Stopping GSE Agent: "
-	if [ -f $agent_dir/gsp_agent_run.pid ]
+	if [ -f $agent_dir/agent_core_run.pid ]
 	then
-		PID=`cat $agent_dir/gsp_agent_run.pid`
+		PID=`cat $agent_dir/agent_core_run.pid`
 		RET=$(kill $PID &> /dev/null; echo $?)
 		if [ $RET -ne 0 ]; then
 			echo -n "not running."
@@ -123,7 +123,7 @@ stop() {
 			echo -n "stopped successfully."
 		fi
 	else
-		echo -n "PID file not found ($agent_dir/gsp_agent_run.pid)"
+		echo -n "PID file not found ($agent_dir/agent_core_run.pid)"
 	fi
 	echo
 	return 0
@@ -145,7 +145,7 @@ case "$1" in
 	RETVAL=$?
 	;;
  	*)
-	echo "Usage: service gsp_agent start|stop|restart"
+	echo "Usage: service agent_core start|stop|restart"
 	RETVAL=1
 	echo
 	;;

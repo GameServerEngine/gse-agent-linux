@@ -29,7 +29,7 @@ The script may show normal `needrestart` output about services, kernels, or VM g
 ## Guided Installation
 
 ```bash
-chmod +x install.sh agent_conf.sh gsp_agent_run
+chmod +x install.sh agent_conf.sh agent_core_run
 sudo ./install.sh
 ```
 
@@ -37,8 +37,8 @@ Default choices:
 
 - install directory: `/home/gameserver/GSP`
 - Linux user: `gameserver`
-- service name: `gsp_agent`
-- log file: `/home/gameserver/GSP/gsp_agent.log`
+- service name: `agent_core`
+- log file: `/home/gameserver/GSP/agent_core.log`
 - Git repository: `https://git.runlevelsystems.com/GSE/Agent-Linux`
 - Git branch: `unstable`
 - repository source path: `.`
@@ -85,8 +85,8 @@ Important `Config.pm` keys:
 
 Important `Preferences.pm` keys:
 
-- `gsp_manages_ftp`
-- `gsp_autorestart_server`
+- `manages_ftp`
+- `autorestart_server`
 - `ftp_method`
 - `PortValidationEnabled`
 - `StartupValidationTimeoutSeconds`
@@ -94,10 +94,10 @@ Important `Preferences.pm` keys:
 
 Compatibility aliases are still written for older panel/agent paths:
 
-- `gsp_manages_ftp`
-- `gsp_autorestart_server`
+- `manages_ftp`
+- `autorestart_server`
 
-The `gsp_` config keys, `X-GSP-*` event headers, `GSP_*` screen-session prefixes, `GSP_WORKSHOP_*` completion markers, `gsp_agent` service/script names, and default `/home/gameserver/GSP` runtime path remain compatibility identifiers. Do not rename them without a coordinated Panel and installed-agent migration.
+The `gsp_` config keys, `X-GSP-*` event headers, `GSP_*` screen-session prefixes, `WORKSHOP_*` completion markers, `agent_core` service/script names, and default `/home/gameserver/GSP` runtime path remain compatibility identifiers. Do not rename them without a coordinated Panel and installed-agent migration.
 
 Important `bash_prefs.cfg` keys:
 
@@ -117,15 +117,15 @@ Default runtime folders:
 - `runtime_status/`
 - `events/`
 - `steamcmd/`
-- `_gsp_content/hooks/`
-- `_gsp_content/generated/`
-- `_gsp_content/runtime/`
+- `_game_content/hooks/`
+- `_game_content/generated/`
+- `_game_content/runtime/`
 
 The repository ships the Linux SteamCMD bootstrap in `steamcmd/`, with the runtime executable at `steamcmd/steamcmd.sh`. The installer and restart-time updater validate this bootstrap and restore missing bootstrap files during install or repair. They preserve existing installed SteamCMD state, including self-updated files, `steamapps/`, logs, credentials, cache, and downloaded content.
 
 Agent startup does not run SteamCMD and does not require internet access. Non-Steam game servers can start and operate without SteamCMD. Steam-specific installs, updates, version checks, and Workshop operations call the SteamCMD helper at operation time; those operations fail with a Steam-specific error if `steamcmd/steamcmd.sh` is missing or unusable, and may require internet access for SteamCMD self-update and content downloads.
 
-The `_gsp_content/runtime/server_content.pids` file is reserved for generated server-content hook processes. During stop/restart cleanup, hook watchdog PIDs are stopped before hook application PIDs. The main game server watchdog PID should not be stored in this file.
+The `_game_content/runtime/server_content.pids` file is reserved for generated server-content hook processes. During stop/restart cleanup, hook watchdog PIDs are stopped before hook application PIDs. The main game server watchdog PID should not be stored in this file.
 
 Legacy `_alsoRun.pid` files are treated as compatibility input. Stop, restart, force-stop, and start preflight import matching helper PIDs into the server-content cleanup path before escalating to main server PID and port cleanup.
 
@@ -137,37 +137,37 @@ In lifecycle management, `game_home` is the server-ID management directory. The 
 
 New installs use:
 
-- `gsp_agent.service`
+- `agent_core.service`
 
 Useful commands:
 
 ```bash
-sudo systemctl status gsp_agent
-sudo systemctl restart gsp_agent
-sudo systemctl stop gsp_agent
-sudo journalctl -u gsp_agent -f
+sudo systemctl status agent_core
+sudo systemctl restart agent_core
+sudo systemctl stop agent_core
+sudo journalctl -u agent_core -f
 ```
 
-The generated unit runs as the selected agent user, sets `WorkingDirectory` to the selected install directory, and starts `gsp_agent_run`.
+The generated unit runs as the selected agent user, sets `WorkingDirectory` to the selected install directory, and starts `agent_core_run`.
 
 ## Production And Debug Workflows
 
 Production hosts should run the agent through systemd:
 
 ```bash
-sudo systemctl enable gsp_agent
-sudo systemctl restart gsp_agent
-sudo systemctl status gsp_agent
+sudo systemctl enable agent_core
+sudo systemctl restart agent_core
+sudo systemctl status agent_core
 ```
 
 Use foreground mode only while debugging from an interactive shell:
 
 ```bash
 cd /home/gameserver/GSP
-./gsp_agent_run --log-stdout
+./agent_core_run --log-stdout
 ```
 
-The same `gsp_agent_run` wrapper is used by systemd and by foreground debugging. At startup it validates configuration, refuses root execution, takes an agent-local lock, checks that the configured agent port is available, applies a queued restart-time update when `agent_auto_update=1`, and then starts `gsp_agent.pl`. If another valid wrapper instance or listener already owns the configured port, startup fails without killing unrelated processes.
+The same `agent_core_run` wrapper is used by systemd and by foreground debugging. At startup it validates configuration, refuses root execution, takes an agent-local lock, checks that the configured agent port is available, applies a queued restart-time update when `agent_auto_update=1`, and then starts `agent_core.pl`. If another valid wrapper instance or listener already owns the configured port, startup fails without killing unrelated processes.
 
 ## Server Status Contract
 
@@ -179,12 +179,12 @@ On agent restart, automatic startup registration is honored only when the manage
 
 ## Restart-Time Updates
 
-If `agent_auto_update=1`, `gsp_agent_run` checks for a pending `gsp_agent_update_request.json` on service or foreground restart. The request is created by the `agent_self_update` RPC and contains the Git repo, branch, and source path selected by the Panel. The wrapper resolves the remote branch head, clones to a temporary staging directory, validates `gsp_agent.pl` with `perl -c`, validates the wrapper with `bash -n`, creates one local backup archive, and copies source-owned files into the install directory while preserving config and runtime/customer data.
+If `agent_auto_update=1`, `agent_core_run` checks for a pending `agent_core_update_request.json` on service or foreground restart. The request is created by the `agent_self_update` RPC and contains the Git repo, branch, and source path selected by the Panel. The wrapper resolves the remote branch head, clones to a temporary staging directory, validates `agent_core.pl` with `perl -c`, validates the wrapper with `bash -n`, creates one local backup archive, and copies source-owned files into the install directory while preserving config and runtime/customer data.
 
 The wrapper records update status in:
 
-- `/home/gameserver/GSP/gsp_agent_update_state.json`
-- `/home/gameserver/GSP/gsp_agent_update.log`
+- `/home/gameserver/GSP/agent_core_update_state.json`
+- `/home/gameserver/GSP/agent_core_update.log`
 
 If the copied agent fails post-copy validation, the wrapper restores the backup immediately. If the updated agent exits during first startup, the wrapper attempts one rollback and relaunches with auto-update suppressed to avoid a failure loop.
 
@@ -192,8 +192,8 @@ Terminal states are recorded as `completed`, `failed`, or `rolled_back`, and the
 
 ## Logs
 
-- main agent log: `/home/gameserver/GSP/gsp_agent.log`
-- systemd journal: `sudo journalctl -u gsp_agent -f`
+- main agent log: `/home/gameserver/GSP/agent_core.log`
+- systemd journal: `sudo journalctl -u agent_core -f`
 - screen logs: `/home/gameserver/GSP/screenlogs/`
 - activity event offline queue: `/home/gameserver/GSP/events/pending-events.jsonl`
 
@@ -202,7 +202,7 @@ Terminal states are recorded as `completed`, `failed`, or `rolled_back`, and the
 ```bash
 cd /home/gameserver/GSP
 ./agent_conf.sh --guided --install-dir /home/gameserver/GSP --agent-user gameserver
-sudo systemctl restart gsp_agent
+sudo systemctl restart agent_core
 ```
 
 Use noninteractive flags when automating:
@@ -214,7 +214,7 @@ Use noninteractive flags when automating:
   --key CHANGE_ME \
   --listen-ip 0.0.0.0 \
   --listen-port 12679 \
-  --web-api-url https://panel.example.com/gsp_api.php \
+  --web-api-url https://panel.example.com/api.php \
   --agent-event-url https://panel.example.com/agent_event_receiver.php \
   --remote-server-id 1 \
   --repo-url https://git.runlevelsystems.com/GSE/Agent-Linux \
@@ -226,12 +226,12 @@ Use noninteractive flags when automating:
 
 Default FTP mode is PureFTPd-compatible account management:
 
-- `gsp_manages_ftp => '1'`
+- `manages_ftp => '1'`
 - `ftp_method => 'PureFTPd'`
 
 The Windows agent uses the same Pure-FTPd virtual-user command model through Cygwin, so Panel `ftp_mgr` calls should behave consistently across Linux and Windows agents.
 
-Set `gsp_manages_ftp` to `0` if FTP accounts are managed outside the agent.
+Set `manages_ftp` to `0` if FTP accounts are managed outside the agent.
 
 ## Troubleshooting
 
@@ -245,12 +245,12 @@ Polkit or systemctl authentication failure:
 
 - run `sudo ./install.sh`
 - do not start with a non-root partial install
-- inspect `sudo journalctl -u gsp_agent -f`
+- inspect `sudo journalctl -u agent_core -f`
 
 Wrong install path or old `/home/gameserver/GSP` log path:
 
 - rerun `./agent_conf.sh --guided --install-dir /home/gameserver/GSP`
-- confirm `Cfg/Config.pm` has `logfile => '/home/gameserver/GSP/gsp_agent.log'`
+- confirm `Cfg/Config.pm` has `logfile => '/home/gameserver/GSP/agent_core.log'`
 - confirm the systemd unit `WorkingDirectory` points to `/home/gameserver/GSP`
 
 Missing packages:
@@ -260,16 +260,16 @@ Missing packages:
 
 Service failed:
 
-- run `sudo systemctl status gsp_agent`
-- run `sudo journalctl -u gsp_agent -f`
-- run `perl -c /home/gameserver/GSP/gsp_agent.pl`
-- check `/home/gameserver/GSP/gsp_agent_update_state.json` if restart-time update is enabled
+- run `sudo systemctl status agent_core`
+- run `sudo journalctl -u agent_core -f`
+- run `perl -c /home/gameserver/GSP/agent_core.pl`
+- check `/home/gameserver/GSP/agent_core_update_state.json` if restart-time update is enabled
 
 Duplicate agent startup refused:
 
 - confirm no other agent instance is already using the configured `listen_port`
-- remove `gsp_agent_run.pid` only if the PID inside it no longer exists
-- do not kill unrelated processes that happen to contain `gsp_agent` in their command line
+- remove `agent_core_run.pid` only if the PID inside it no longer exists
+- do not kill unrelated processes that happen to contain `agent_core` in their command line
 
 Config missing or invalid:
 
@@ -280,9 +280,9 @@ Config missing or invalid:
 ## Clean Reinstall
 
 ```bash
-sudo systemctl stop gsp_agent || true
-sudo systemctl disable gsp_agent || true
-sudo rm -f /etc/systemd/system/gsp_agent.service
+sudo systemctl stop agent_core || true
+sudo systemctl disable agent_core || true
+sudo rm -f /etc/systemd/system/agent_core.service
 sudo systemctl daemon-reload
 ```
 

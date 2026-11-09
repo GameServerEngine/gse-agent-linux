@@ -2,21 +2,21 @@
 
 # Generic Init script if we can't find what kind of Linux we're on
 
-agent_dir=GSP_AGENT_DIR
-agent_user=GSP_USER
+agent_dir=AGENT_DIR
+agent_user=AGENT_USER
 
 # Start function.
 start() {
     echo "Starting GSE Agent..."
     cd $agent_dir
-    su -c "screen -d -m -t gsp_agent -c gsp_screenrc -S gsp_agent ./gsp_agent_run -pidfile gsp_agent_run.pid" $agent_user &> $agent_dir/gsp_agent.svc &
+    su -c "screen -d -m -t agent_core -c screen_config -S agent_core ./agent_core_run -pidfile agent_core_run.pid" $agent_user &> $agent_dir/agent_core.svc &
     echo
 }
 
 # Stop function.
 stop() {
     echo "Stopping GSE Agent..."
-    kill `cat $agent_dir/gsp_agent_run.pid`
+    kill `cat $agent_dir/agent_core_run.pid`
 }
 
 restart() {
@@ -35,7 +35,7 @@ case $1 in
     restart
     ;;
     *)
-    echo "Usage: gsp_agent {start|stop|restart}"
+    echo "Usage: agent_core {start|stop|restart}"
     exit 1
     ;;
 esac

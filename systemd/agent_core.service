@@ -7,10 +7,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User={GSP_AGENT_USER}
-Group={GSP_AGENT_USER}
-WorkingDirectory={GSP_AGENT_PATH}
-ExecStart={GSP_AGENT_RUN_SCRIPT} -pidfile {GSP_AGENT_PID_FILE}
+User={AGENT_USER}
+Group={AGENT_USER}
+WorkingDirectory={AGENT_PATH}
+ExecStart={AGENT_RUN_SCRIPT} -pidfile {AGENT_PID_FILE}
 Restart=on-failure
 RestartSec=10
 KillSignal=SIGTERM

@@ -25,10 +25,10 @@ SET time_zone = "+00:00";
 -- --------------------------------------------------------
 
 --
--- Table structure for table `gsp_machines`
+-- Table structure for table `agent_machines`
 --
 
-CREATE TABLE `gsp_machines` (
+CREATE TABLE `agent_machines` (
   `id` int(11) NOT NULL,
   `machine_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
   `hostname` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
@@ -41,9 +41,9 @@ CREATE TABLE `gsp_machines` (
 --
 
 --
--- Indexes for table `gsp_machines`
+-- Indexes for table `agent_machines`
 --
-ALTER TABLE `gsp_machines`
+ALTER TABLE `agent_machines`
   ADD PRIMARY KEY (`id`),
   ADD UNIQUE KEY `uniq_machine` (`machine_id`);
 
@@ -52,9 +52,9 @@ ALTER TABLE `gsp_machines`
 --
 
 --
--- AUTO_INCREMENT for table `gsp_machines`
+-- AUTO_INCREMENT for table `agent_machines`
 --
-ALTER TABLE `gsp_machines`
+ALTER TABLE `agent_machines`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
 COMMIT;
 

@@ -38,12 +38,12 @@ require_absent_regex_active() {
 	fi
 }
 
-require_file "$repo_root/gsp_agent.pl"
+require_file "$repo_root/agent_core.pl"
 require_file "$repo_root/install.sh"
 require_file "$repo_root/install_agent_prereqs.sh"
 require_file "$repo_root/agent_conf.sh"
-require_file "$repo_root/gsp_agent_run"
-require_file "$repo_root/systemd/gsp_agent.service"
+require_file "$repo_root/agent_core_run"
+require_file "$repo_root/systemd/agent_core.service"
 require_file "$repo_root/Cfg/bash_prefs.cfg.default"
 require_file "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh"
 require_file "$repo_root/tests/validate_watchdog_stop_contract.sh"
@@ -57,8 +57,8 @@ require_file "$repo_root/steamcmd/linux32/crashhandler.so"
 [ -x "$repo_root/steamcmd/steamcmd.sh" ] || fail "steamcmd/steamcmd.sh must be executable"
 [ -x "$repo_root/steamcmd/linux32/steamcmd" ] || fail "steamcmd/linux32/steamcmd must be executable"
 
-perl -c "$repo_root/gsp_agent.pl" >/dev/null
-bash -n "$repo_root/install.sh" "$repo_root/install_agent_prereqs.sh" "$repo_root/agent_conf.sh" "$repo_root/gsp_agent_run"
+perl -c "$repo_root/agent_core.pl" >/dev/null
+bash -n "$repo_root/install.sh" "$repo_root/install_agent_prereqs.sh" "$repo_root/agent_conf.sh" "$repo_root/agent_core_run"
 bash -n "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh"
 bash -n "$repo_root/tests/validate_watchdog_stop_contract.sh"
 bash -n "$repo_root/tests/validate_lifecycle_game_key_contract.sh"
@@ -87,19 +87,19 @@ require_text "$repo_root/install.sh" "systemctl stop"
 require_text "$repo_root/install.sh" "systemctl disable"
 require_text "$repo_root/install.sh" "rm -f \"\$unit_path\""
 
-require_text "$repo_root/gsp_agent.pl" "PortValidationEnabled"
-require_text "$repo_root/gsp_agent.pl" "StartupValidationTimeoutSeconds"
-require_text "$repo_root/gsp_agent.pl" "PortCheckIntervalSeconds"
-require_text "$repo_root/gsp_agent.pl" "CPUUsage => agent_cpu_usage_percent()"
-require_text "$repo_root/gsp_agent.pl" "MemoryUsage => agent_ram_usage_percent()"
-require_text "$repo_root/gsp_agent.pl" "sub build_expected_ports"
-require_text "$repo_root/gsp_agent.pl" "sub validate_expected_ports"
-require_text "$repo_root/gsp_agent.pl" "sub has_listening_port_named"
-require_text "$repo_root/gsp_agent.pl" 'my $os = `uname -sr 2>/dev/null`;'
-require_text "$repo_root/gsp_agent.pl" "clear_pid_metadata(\$home_id);"
-require_text "$repo_root/gsp_agent.pl" "SteamCMD is unavailable. Expected bundled bootstrap executable"
-require_text "$repo_root/gsp_agent.pl" "SteamCMD bootstrap missing from source payload"
-require_text "$repo_root/gsp_agent_run" "restore_missing_steamcmd_bootstrap"
+require_text "$repo_root/agent_core.pl" "PortValidationEnabled"
+require_text "$repo_root/agent_core.pl" "StartupValidationTimeoutSeconds"
+require_text "$repo_root/agent_core.pl" "PortCheckIntervalSeconds"
+require_text "$repo_root/agent_core.pl" "CPUUsage => agent_cpu_usage_percent()"
+require_text "$repo_root/agent_core.pl" "MemoryUsage => agent_ram_usage_percent()"
+require_text "$repo_root/agent_core.pl" "sub build_expected_ports"
+require_text "$repo_root/agent_core.pl" "sub validate_expected_ports"
+require_text "$repo_root/agent_core.pl" "sub has_listening_port_named"
+require_text "$repo_root/agent_core.pl" 'my $os = `uname -sr 2>/dev/null`;'
+require_text "$repo_root/agent_core.pl" "clear_pid_metadata(\$home_id);"
+require_text "$repo_root/agent_core.pl" "SteamCMD is unavailable. Expected bundled bootstrap executable"
+require_text "$repo_root/agent_core.pl" "SteamCMD bootstrap missing from source payload"
+require_text "$repo_root/agent_core_run" "restore_missing_steamcmd_bootstrap"
 
 legacy_linux_repo="$(printf '%s%s' 'GSP-Agent' '-Linux')"
 legacy_github_gsp="$(printf '%s%s%s%s' 'https://github.com/' 'OpenGamePanel/' 'GSP-Agent' '-Linux')"
@@ -121,17 +121,17 @@ require_absent_regex_active "$windows_only_regex"
 
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/gse-linux-agent-test.XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT
-touch "$tmpdir/gsp_agent_run"
-chmod +x "$tmpdir/gsp_agent_run"
+touch "$tmpdir/agent_core_run"
+chmod +x "$tmpdir/agent_core_run"
 sed \
-	-e "s#{GSP_AGENT_PATH}#${tmpdir}#g" \
-	-e "s#{GSP_AGENT_USER}#$(id -un)#g" \
-	-e "s#{GSP_AGENT_RUN_SCRIPT}#${tmpdir}/gsp_agent_run#g" \
-	-e "s#{GSP_AGENT_PID_FILE}#${tmpdir}/gsp_agent_run.pid#g" \
-	"$repo_root/systemd/gsp_agent.service" > "$tmpdir/gsp_agent.service"
+	-e "s#{AGENT_PATH}#${tmpdir}#g" \
+	-e "s#{AGENT_USER}#$(id -un)#g" \
+	-e "s#{AGENT_RUN_SCRIPT}#${tmpdir}/agent_core_run#g" \
+	-e "s#{AGENT_PID_FILE}#${tmpdir}/agent_core_run.pid#g" \
+	"$repo_root/systemd/agent_core.service" > "$tmpdir/agent_core.service"
 
 if command -v systemd-analyze >/dev/null 2>&1; then
-	systemd-analyze verify "$tmpdir/gsp_agent.service" >/dev/null
+	systemd-analyze verify "$tmpdir/agent_core.service" >/dev/null
 else
 	echo "SKIP: systemd-analyze is not available"
 fi

@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 ### BEGIN INIT INFO
-# Provides:          gsp_agent
+# Provides:          agent_core
 # Required-Start:    $all
 # Required-Stop:     $all
 # Should-Start:      $all
@@ -13,8 +13,8 @@
 ### END INIT INFO
 #
 
-agent_dir=GSP_AGENT_DIR
-agent_user=GSP_USER
+agent_dir=AGENT_DIR
+agent_user=AGENT_USER
 
 #
 # main()
@@ -26,9 +26,9 @@ then
 fi
 
 start() {
-	if [ -e "$agent_dir/gsp_agent_run.pid" ]
+	if [ -e "$agent_dir/agent_core_run.pid" ]
 	then
-		pid=$(cat $agent_dir/gsp_agent_run.pid)
+		pid=$(cat $agent_dir/agent_core_run.pid)
 		out=$(kill -0 $pid > /dev/null 2>&1)
 		if [ $? == 0 ]
 		then
@@ -90,14 +90,14 @@ start() {
 	fi
 
 	cd $agent_dir
-	out=$(su -c "screen -d -m -t gsp_agent -c gsp_screenrc -S gsp_agent ./gsp_agent_run -pidfile gsp_agent_run.pid" $agent_user >/dev/null 2>&1)
+	out=$(su -c "screen -d -m -t agent_core -c screen_config -S agent_core ./agent_core_run -pidfile agent_core_run.pid" $agent_user >/dev/null 2>&1)
 	return 0
 }
 
 stop() {
-	if [ -e "$agent_dir/gsp_agent_run.pid" ]
+	if [ -e "$agent_dir/agent_core_run.pid" ]
 	then
-		pid=$(cat $agent_dir/gsp_agent_run.pid)
+		pid=$(cat $agent_dir/agent_core_run.pid)
 		kill -0 $pid > /dev/null 2>&1
 		if [ $? == 0 ]
 		then
@@ -126,7 +126,7 @@ case "${1:-''}" in
 	RETVAL=$?
 	;;
  	*)
-	echo "Usage: service gsp_agent start|stop|restart"
+	echo "Usage: service agent_core start|stop|restart"
 	exit 1
 	;;
 esac

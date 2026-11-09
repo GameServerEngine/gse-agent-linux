@@ -9,14 +9,14 @@ The Panel is authoritative. The Linux agent executes the work the Panel requests
 New Linux installs default to:
 
 - agent root: `/home/gameserver/GSP`
-- run script: `gsp_agent_run`
-- service: `gsp_agent.service`
-- log file: `/home/gameserver/GSP/gsp_agent.log`
+- run script: `agent_core_run`
+- service: `agent_core.service`
+- log file: `/home/gameserver/GSP/agent_core.log`
 - update source: configured Git repository, branch, and source path in `Cfg/bash_prefs.cfg`
 
-Legacy names such as `gsp_agent_run` remain wrappers or protocol compatibility details only.
+Legacy names such as `agent_core_run` remain wrappers or protocol compatibility details only.
 
-The repository identity is `GSE/Agent-Linux`, but installed-agent compatibility names remain `gsp_agent`, `/home/gameserver/GSP`, `gsp_` config keys, `X-GSP-*` headers, `GSP_*` screen names, and `GSP_WORKSHOP_*` job markers until the Panel and field installs are migrated together.
+The repository identity is `GSE/Agent-Linux`, but installed-agent compatibility names remain `agent_core`, `/home/gameserver/GSP`, `gsp_` config keys, `X-GSP-*` headers, `GSP_*` screen names, and `WORKSHOP_*` job markers until the Panel and field installs are migrated together.
 
 ## Legacy Workshop RPC
 
@@ -30,16 +30,16 @@ Current compatibility rule:
 - new installs write per-home records under `WorkshopModsInfo/home_<home_id>/`
 - each record stores mod string, Workshop item ID, title, installed folder/path, Workshop App ID, install status, and timestamps
 - the generated job writes `<game_home>/WorkshopInstallStatus.json` as `running`, `completed`, or `failed`
-- the generated job prints `GSP_WORKSHOP_INSTALL_COMPLETE` or `GSP_WORKSHOP_INSTALL_FAILED` so the Panel can avoid stale `Update in progress` displays if the generic update screen lingers
+- the generated job prints `WORKSHOP_INSTALL_COMPLETE` or `WORKSHOP_INSTALL_FAILED` so the Panel can avoid stale `Update in progress` displays if the generic update screen lingers
 
 ## Server Content Hook Runtime
 
 The Linux agent prepares this runtime layout for generated content hooks:
 
-- `_gsp_content/hooks/`
-- `_gsp_content/generated/`
-- `_gsp_content/runtime/`
-- `_gsp_content/runtime/server_content.pids`
+- `_game_content/hooks/`
+- `_game_content/generated/`
+- `_game_content/runtime/`
+- `_game_content/runtime/server_content.pids`
 
 During stop/restart, hook watchdog PIDs are cleaned up before hook application PIDs. Main game server watchdog PIDs should not be written to `server_content.pids`.
 
@@ -58,7 +58,7 @@ The Linux agent exposes these structured RPCs for the Admin -> Servers per-agent
 - `server_status` keeps Linux-native process/session/port checks and returns shared readiness fields used by the Panel on both agents, including port-validation settings, expected/listening/missing ports, `CPUUsage`, `MemoryUsage`, `ProcessRunning`, `StatusState`, `linux_pid`, and compatibility aliases.
 - `force_stop_server(home_id, server_ip, server_port, home_path)` removes the matching startup flag, writes `status.stopped`, runs the shared hard-stop helper, verifies session/process/port absence, and returns a structured result. Protected or ambiguous port owners are reported as actionable failures instead of being killed. It never restarts the game server.
 - `agent_self_update(payload)` records a pending restart-time update request.
-- `agent_update_status` returns the latest `gsp_agent_update_state.json` content.
+- `agent_update_status` returns the latest `agent_core_update_state.json` content.
 
 ## Installer Lifecycle
 
@@ -68,9 +68,9 @@ The agent does not run SteamCMD during startup, and non-Steam operations do not 
 
 ## Self-Update And Rollback
 
-The running agent never replaces its own files. The Panel sends an `agent_self_update` request with `component`, `repo_url`, `branch`, and `source_path`; the Linux agent validates those fields, writes `gsp_agent_update_request.json`, and records `pending` in `gsp_agent_update_state.json`.
+The running agent never replaces its own files. The Panel sends an `agent_self_update` request with `component`, `repo_url`, `branch`, and `source_path`; the Linux agent validates those fields, writes `agent_core_update_request.json`, and records `pending` in `agent_core_update_state.json`.
 
-Restart-time updates are local wrapper behavior, not Panel business logic. On the next normal service or foreground restart, `gsp_agent_run` checks `agent_auto_update=1` in `Cfg/bash_prefs.cfg` and the pending request. It stages the requested Git repo/branch/source path, validates `gsp_agent.pl` with `perl -c`, validates `gsp_agent_run` with `bash -n` when present, creates one local restart-update backup, copies staged files into place, records the result, and then starts the agent.
+Restart-time updates are local wrapper behavior, not Panel business logic. On the next normal service or foreground restart, `agent_core_run` checks `agent_auto_update=1` in `Cfg/bash_prefs.cfg` and the pending request. It stages the requested Git repo/branch/source path, validates `agent_core.pl` with `perl -c`, validates `agent_core_run` with `bash -n` when present, creates one local restart-update backup, copies staged files into place, records the result, and then starts the agent.
 
 The restart-time update config keys are:
 
@@ -98,4 +98,4 @@ The updater preserves host/customer data and local config:
 
 Restart-time updates use the same SteamCMD preservation rule as install and repair: restore missing bundled bootstrap files only, preserve existing `steamcmd/` state, and never delete `steamapps/` or downloaded Workshop/content data.
 
-If the updated agent does not listen on its RPC port before the timeout, the updater stops the failed instance, restores the backup, starts the previous agent, and records `rolled_back` or `failed` in `gsp_agent_update_state.json`.
+If the updated agent does not listen on its RPC port before the timeout, the updater stops the failed instance, restores the backup, starts the previous agent, and records `rolled_back` or `failed` in `agent_core_update_state.json`.

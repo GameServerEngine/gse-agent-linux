@@ -27,7 +27,7 @@ Options:
   --listen-ip IP              Agent bind IP. Default: ${DEFAULT_IP}
   --listen-port PORT          Agent bind port. Default: ${DEFAULT_PORT}
   --sudo-password VALUE       Optional sudo password for legacy sudo_exec flows.
-  --web-api-url URL           Panel gsp_api.php URL.
+  --web-api-url URL           Panel api.php URL.
   --agent-event-url URL       Panel agent_event_receiver.php URL.
   --remote-server-id ID       Panel remote server ID.
   --ftp-managed 0|1           Whether GSE should manage FTP accounts. Default: 1
@@ -155,7 +155,7 @@ if [ "$guided" -eq 1 ]; then
 	key="${key:-$(ask_secret "Agent key/shared secret")}"
 	listen_ip="$(ask "Listen IP" "$listen_ip")"
 	listen_port="$(ask "Listen port" "$listen_port")"
-	web_api_url="$(ask "Panel API URL, usually https://panel.example.com/gsp_api.php" "$web_api_url")"
+	web_api_url="$(ask "Panel API URL, usually https://panel.example.com/api.php" "$web_api_url")"
 	agent_event_url="$(ask "Panel event receiver URL, usually https://panel.example.com/agent_event_receiver.php" "$agent_event_url")"
 	remote_server_id="$(ask "Panel remote server ID" "$remote_server_id")"
 	ftp_managed="$(ask "Manage FTP accounts? 1=yes, 0=no" "$ftp_managed")"
@@ -191,7 +191,7 @@ require_01 "auto-update" "$auto_update"
 	exit 1
 }
 
-mkdir -p "$cfg_dir" "${install_dir}/logs" "${install_dir}/tmp" "${install_dir}/screenlogs" "${install_dir}/runtime_status" "${install_dir}/events" "${install_dir}/_gsp_content/hooks" "${install_dir}/_gsp_content/generated" "${install_dir}/_gsp_content/runtime"
+mkdir -p "$cfg_dir" "${install_dir}/logs" "${install_dir}/tmp" "${install_dir}/screenlogs" "${install_dir}/runtime_status" "${install_dir}/events" "${install_dir}/_game_content/hooks" "${install_dir}/_game_content/generated" "${install_dir}/_game_content/runtime"
 
 key_q="$(perl_quote "$key")"
 listen_ip_q="$(perl_quote "$listen_ip")"
@@ -205,7 +205,7 @@ ftp_method_q="$(perl_quote "$ftp_method")"
 
 cat > "$cfgfile" <<EOF
 %Cfg::Config = (
-	logfile => '${install_dir_q}/gsp_agent.log',
+	logfile => '${install_dir_q}/agent_core.log',
 	listen_port => '${listen_port_q}',
 	listen_ip => '${listen_ip_q}',
 	version => '${DEFAULT_AGENT_VERSION}',
@@ -230,9 +230,9 @@ cat > "$prefsfile" <<EOF
 %Cfg::Preferences = (
 	screen_log_local => '${screen_log_local}',
 	delete_logs_after => '${delete_logs_after}',
-	gsp_manages_ftp => '${ftp_managed}',
+	manages_ftp => '${ftp_managed}',
 	ftp_method => '${ftp_method_q}',
-	gsp_autorestart_server => '${auto_restart}',
+	autorestart_server => '${auto_restart}',
 	protocol_shutdown_waittime => '${protocol_shutdown_waittime}',
 	linux_user_per_game_server => '${linux_user_per_game_server}',
 	PortValidationEnabled => '1',

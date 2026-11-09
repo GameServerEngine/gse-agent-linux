@@ -3,15 +3,15 @@
 set -euo pipefail
 
 AGENTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT="${AGENTDIR}/gsp_agent.pl"
+AGENT="${AGENTDIR}/agent_core.pl"
 BASH_PREFS_CONF="${AGENTDIR}/Cfg/bash_prefs.cfg"
-LOCK_FILE="${AGENTDIR}/gsp_agent_run.lock"
-DEFAULT_PID_FILE="${AGENTDIR}/gsp_agent_run.pid"
-STATE_FILE="${AGENTDIR}/gsp_agent_update_state.json"
-REQUEST_FILE="${AGENTDIR}/gsp_agent_update_request.json"
-UPDATE_LOG="${AGENTDIR}/gsp_agent_update.log"
-REVISION_FILE="${AGENTDIR}/.gsp_agent_source_revision"
-FAIL_MARKER="${AGENTDIR}/.gsp_agent_update_failed"
+LOCK_FILE="${AGENTDIR}/agent_core_run.lock"
+DEFAULT_PID_FILE="${AGENTDIR}/agent_core_run.pid"
+STATE_FILE="${AGENTDIR}/agent_core_update_state.json"
+REQUEST_FILE="${AGENTDIR}/agent_core_update_request.json"
+UPDATE_LOG="${AGENTDIR}/agent_core_update.log"
+REVISION_FILE="${AGENTDIR}/.agent_core_source_revision"
+FAIL_MARKER="${AGENTDIR}/.agent_core_update_failed"
 BACKUP_ARCHIVE="${AGENTDIR}/agent_restart_update_backup.tar.gz"
 TIMEOUT=10
 PID_FILE=""
@@ -138,8 +138,8 @@ ensure_port_available() {
 }
 
 prepare_runtime() {
-	mkdir -p "${AGENTDIR}/logs" "${AGENTDIR}/screenlogs" "${AGENTDIR}/tmp" "${AGENTDIR}/runtime_status" "${AGENTDIR}/events" "${AGENTDIR}/_gsp_content/hooks" "${AGENTDIR}/_gsp_content/generated" "${AGENTDIR}/_gsp_content/runtime"
-	touch "${AGENTDIR}/_gsp_content/runtime/server_content.pids" 2>/dev/null || true
+	mkdir -p "${AGENTDIR}/logs" "${AGENTDIR}/screenlogs" "${AGENTDIR}/tmp" "${AGENTDIR}/runtime_status" "${AGENTDIR}/events" "${AGENTDIR}/_game_content/hooks" "${AGENTDIR}/_game_content/generated" "${AGENTDIR}/_game_content/runtime"
+	touch "${AGENTDIR}/_game_content/runtime/server_content.pids" 2>/dev/null || true
 }
 
 validate_config() {
@@ -207,20 +207,20 @@ validate_staged_source() {
 		write_state failed "Source component folder missing"
 		return 1
 	}
-	[ -s "$src/gsp_agent.pl" ] || {
-		write_state failed "Staged gsp_agent.pl missing or empty"
+	[ -s "$src/agent_core.pl" ] || {
+		write_state failed "Staged agent_core.pl missing or empty"
 		return 1
 	}
-	if grep -Eqi '<html|not found|404' "$src/gsp_agent.pl"; then
-		write_state failed "Staged gsp_agent.pl looks like an HTTP error page"
+	if grep -Eqi '<html|not found|404' "$src/agent_core.pl"; then
+		write_state failed "Staged agent_core.pl looks like an HTTP error page"
 		return 1
 	fi
-	(cd "$src" && perl -c gsp_agent.pl >> "$UPDATE_LOG" 2>&1) || {
-		write_state failed "Staged gsp_agent.pl failed syntax validation"
+	(cd "$src" && perl -c agent_core.pl >> "$UPDATE_LOG" 2>&1) || {
+		write_state failed "Staged agent_core.pl failed syntax validation"
 		return 1
 	}
-	[ ! -f "$src/gsp_agent_run" ] || bash -n "$src/gsp_agent_run" >> "$UPDATE_LOG" 2>&1 || {
-		write_state failed "Staged gsp_agent_run failed syntax validation"
+	[ ! -f "$src/agent_core_run" ] || bash -n "$src/agent_core_run" >> "$UPDATE_LOG" 2>&1 || {
+		write_state failed "Staged agent_core_run failed syntax validation"
 		return 1
 	}
 	validate_steamcmd_bootstrap "$src" || return 1
@@ -291,9 +291,9 @@ backup_current_agent() {
 		--exclude='./component_backups' \
 		--exclude='./agent_self_update_backups' \
 		--exclude='./agent_restart_update_backup.tar.gz' \
-		--exclude='./gsp_agent_update_state.json' \
-		--exclude='./gsp_agent_update_request.json' \
-		--exclude='./gsp_agent_update.log' \
+		--exclude='./agent_core_update_state.json' \
+		--exclude='./agent_core_update_request.json' \
+		--exclude='./agent_core_update.log' \
 		--exclude='./*.pid' \
 		-czf "$tmp_archive" -C "$AGENTDIR" . >> "$UPDATE_LOG" 2>&1 && mv "$tmp_archive" "$BACKUP_ARCHIVE"
 }
@@ -319,9 +319,9 @@ copy_staged_source() {
 			--exclude='component_backups/' \
 			--exclude='agent_self_update_backups/' \
 			--exclude='agent_restart_update_backup.tar.gz' \
-			--exclude='gsp_agent_update_state.json' \
-			--exclude='gsp_agent_update_request.json' \
-			--exclude='gsp_agent_update.log' \
+			--exclude='agent_core_update_state.json' \
+			--exclude='agent_core_update_request.json' \
+			--exclude='agent_core_update.log' \
 			--exclude='*.pid' \
 			"${src%/}/" "${AGENTDIR}/" >> "$UPDATE_LOG" 2>&1
 	else
@@ -343,9 +343,9 @@ copy_staged_source() {
 			--exclude='./component_backups' \
 			--exclude='./agent_self_update_backups' \
 			--exclude='./agent_restart_update_backup.tar.gz' \
-			--exclude='./gsp_agent_update_state.json' \
-			--exclude='./gsp_agent_update_request.json' \
-			--exclude='./gsp_agent_update.log' \
+			--exclude='./agent_core_update_state.json' \
+			--exclude='./agent_core_update_request.json' \
+			--exclude='./agent_core_update.log' \
 			--exclude='./*.pid' \
 			-cf - .) | (cd "$AGENTDIR" && tar -xf -) >> "$UPDATE_LOG" 2>&1
 	fi
@@ -358,7 +358,7 @@ restore_backup() {
 }
 
 auto_update_on_restart() {
-	[ "${GSP_AGENT_SKIP_AUTO_UPDATE:-0}" = "1" ] && return 0
+	[ "${AGENT_SKIP_AUTO_UPDATE:-0}" = "1" ] && return 0
 	[ -s "$REQUEST_FILE" ] || return 0
 	if [ "$(read_pref agent_auto_update 0)" != "1" ]; then
 		load_update_request || true
@@ -454,7 +454,7 @@ auto_update_on_restart() {
 	ROLLBACK_AVAILABLE=1
 
 	changed_wrapper=0
-	if [ -f "$src/gsp_agent_run" ] && ! cmp -s "$src/gsp_agent_run" "$AGENTDIR/gsp_agent_run"; then
+	if [ -f "$src/agent_core_run" ] && ! cmp -s "$src/agent_core_run" "$AGENTDIR/agent_core_run"; then
 		changed_wrapper=1
 	fi
 
@@ -470,9 +470,9 @@ auto_update_on_restart() {
 		rm -rf "$tmp_dir"
 		return 0
 	fi
-	chmod +x "$AGENTDIR/gsp_agent_run" "$AGENTDIR/agent_conf.sh" "$AGENT" 2>/dev/null || true
+	chmod +x "$AGENTDIR/agent_core_run" "$AGENTDIR/agent_conf.sh" "$AGENT" 2>/dev/null || true
 
-	if ! (cd "$AGENTDIR" && perl -c gsp_agent.pl >> "$UPDATE_LOG" 2>&1); then
+	if ! (cd "$AGENTDIR" && perl -c agent_core.pl >> "$UPDATE_LOG" 2>&1); then
 		printf '%s\n' "$failed_key" > "$FAIL_MARKER"
 		if restore_backup; then
 			write_state rolled_back "Updated agent failed post-copy syntax validation; restored previous files" 1 "$current"
@@ -494,7 +494,7 @@ auto_update_on_restart() {
 
 	if [ "$changed_wrapper" -eq 1 ]; then
 		log "$(date): GSE agent wrapper changed during update; relaunching wrapper."
-		GSP_AGENT_SKIP_AUTO_UPDATE=1 exec "$AGENTDIR/gsp_agent_run" -pidfile "$PID_FILE" "${agent_args[@]}"
+		AGENT_SKIP_AUTO_UPDATE=1 exec "$AGENTDIR/agent_core_run" -pidfile "$PID_FILE" "${agent_args[@]}"
 	fi
 }
 
@@ -508,7 +508,7 @@ rollback_after_start_failure() {
 	[ -n "$UPDATE_FAILED_KEY" ] && printf '%s\n' "$UPDATE_FAILED_KEY" > "$FAIL_MARKER"
 	if restore_backup; then
 		write_state rolled_back "Updated agent exited during startup; restored previous files" 1 "$(cat "$REVISION_FILE" 2>/dev/null || true)"
-		GSP_AGENT_SKIP_AUTO_UPDATE=1 exec "$AGENTDIR/gsp_agent_run" -pidfile "$PID_FILE" "${agent_args[@]}"
+		AGENT_SKIP_AUTO_UPDATE=1 exec "$AGENTDIR/agent_core_run" -pidfile "$PID_FILE" "${agent_args[@]}"
 	fi
 	write_state failed "Updated agent exited during startup and rollback restore failed" 1 "$(cat "$REVISION_FILE" 2>/dev/null || true)"
 	return 1

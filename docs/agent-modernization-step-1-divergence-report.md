@@ -38,10 +38,10 @@ Official documentation sources checked:
 
 Update-on-restart assumption check:
 
-- OGP Linux implements restart-time auto-update in `ogp_agent_run` and defaults it on when `bash_prefs.cfg` is absent or when `agent_auto_update=1`.
+- OGP Linux implements restart-time auto-update in `agent_core_run` and defaults it on when `bash_prefs.cfg` is absent or when `agent_auto_update=1`.
 - OGP Windows source exposes the same `agent_auto_update` config prompt, but the verified `OGP-Agent-Windows` source tree does not contain an equivalent launcher wrapper that implements restart-time updates.
-- Current GSP Linux defaults `agent_auto_update=0` and `gsp_agent_run` does not implement restart-time update.
-- Current GSP Windows has a stale helper that can update only `gsp_agent.pl`, but the root launcher does not call it.
+- Current GSP Linux defaults `agent_auto_update=0` and `agent_core_run` does not implement restart-time update.
+- Current GSP Windows has a stale helper that can update only `agent_core.pl`, but the root launcher does not call it.
 
 This is not a workflow failure because the original behavior was verified and the divergence is now explicit. Later steps must not assume OGP and GSP already match here.
 
@@ -97,14 +97,14 @@ Evidence:
 
 - `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/install.sh:269` to `304` copies agent files and installs init/systemd wrappers.
 - `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/install.sh:336` to `341` enables and restarts the service.
-- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/systemd/ogp_agent.service:8` to `16` uses `Type=oneshot`, `RemainAfterExit=yes`, `ExecStart={OGP_AGENT_PATH}/ogp_agent_init start`, and `ExecStop={OGP_AGENT_PATH}/ogp_agent_init stop`.
+- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/systemd/agent_core.service:8` to `16` uses `Type=oneshot`, `RemainAfterExit=yes`, `ExecStart={AGENT_PATH}/agent_core_init start`, and `ExecStop={AGENT_PATH}/agent_core_init stop`.
 
 ### Foreground and Manual Startup
 
-Legacy documentation starts the service with `/etc/init.d/ogp_agent start` or starts the agent manually with:
+Legacy documentation starts the service with `/etc/init.d/agent_core start` or starts the agent manually with:
 
 ```sh
-perl ./ogp_agent.pl --log-stdout
+perl ./agent_core.pl --log-stdout
 ```
 
 Evidence:
@@ -113,26 +113,26 @@ Evidence:
 
 ### Update On Restart
 
-The original Linux restart-time update implementation lives in `ogp_agent_run`, not in `ogp_agent.pl`.
+The original Linux restart-time update implementation lives in `agent_core_run`, not in `agent_core.pl`.
 
 Evidence:
 
-- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/ogp_agent_run:1` to `18` defines wrapper state, `BASH_PREFS_CONF`, and `REPONAME=OGP-Agent-Linux`.
-- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/ogp_agent_run:141` to `160` defaults `AUTO_UPDATE=yes` when prefs are missing and enables it when `agent_auto_update=1`.
-- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/ogp_agent_run:208` to `297` downloads the latest master archive, self-relaunches if the wrapper changed, preserves existing preference files, copies code files, writes the upstream commit hash to `Config.pm`, and fixes permissions.
-- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/ogp_agent_run:300` to `318` obtains sudo password, restricts access, runs update, detects systemd, and starts the crash restart loop.
+- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/agent_core_run:1` to `18` defines wrapper state, `BASH_PREFS_CONF`, and `REPONAME=OGP-Agent-Linux`.
+- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/agent_core_run:141` to `160` defaults `AUTO_UPDATE=yes` when prefs are missing and enables it when `agent_auto_update=1`.
+- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/agent_core_run:208` to `297` downloads the latest master archive, self-relaunches if the wrapper changed, preserves existing preference files, copies code files, writes the upstream commit hash to `Config.pm`, and fixes permissions.
+- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/agent_core_run:300` to `318` obtains sudo password, restricts access, runs update, detects systemd, and starts the crash restart loop.
 
 ### Startup Guards
 
 Original OGP Linux splits startup guards across wrapper and Perl agent:
 
-- `ogp_agent_run` warns and delays when run as root but does not refuse to start.
-- `ogp_agent.pl` performs startup directory creation, startup flag processing, and automatic server restart from startup markers.
+- `agent_core_run` warns and delays when run as root but does not refuse to start.
+- `agent_core.pl` performs startup directory creation, startup flag processing, and automatic server restart from startup markers.
 
 Evidence:
 
-- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/ogp_agent_run:24` to `55`
-- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Windows/OGP/ogp_agent.pl:148` to `284` shows the shared OGP Perl startup-marker flow used by both platforms.
+- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Linux/agent_core_run:24` to `55`
+- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Windows/OGP/agent_core.pl:148` to `284` shows the shared OGP Perl startup-marker flow used by both platforms.
 
 ### Repository and Runtime Layout
 
@@ -166,7 +166,7 @@ Evidence:
 
 ### Service, Manual Startup, and Layout
 
-The verified `OGP-Agent-Windows` source repository contains `OGP/` and `bin/ogp_agent`. The official service and batch packaging comes from the Windows Easy Installer distribution, not from a full source-side `GSP64` layout.
+The verified `OGP-Agent-Windows` source repository contains `OGP/` and `bin/agent_core`. The official service and batch packaging comes from the Windows Easy Installer distribution, not from a full source-side `GSP64` layout.
 
 The official troubleshooting path is manual start and stop through Windows batch files:
 
@@ -175,7 +175,7 @@ The official troubleshooting path is manual start and stop through Windows batch
 
 ### Update On Restart
 
-The verified Windows source has an update preference prompt but no verified source-side equivalent to Linux `ogp_agent_run`.
+The verified Windows source has an update preference prompt but no verified source-side equivalent to Linux `agent_core_run`.
 
 This matters for GSP: any Windows restart-time update helper must be treated as GSP-specific packaging unless a matching Easy Installer source is verified.
 
@@ -185,9 +185,9 @@ The original Windows Perl agent rejects UID 0, creates logs/shared/startup direc
 
 Evidence:
 
-- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Windows/OGP/ogp_agent.pl:106` to `113`
-- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Windows/OGP/ogp_agent.pl:148` to `284`
-- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Windows/OGP/ogp_agent.pl:360` to `378`
+- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Windows/OGP/agent_core.pl:106` to `113`
+- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Windows/OGP/agent_core.pl:148` to `284`
+- `/home/dev/Projects/GSP/references/OGP/OGP-Agent-Windows/OGP/agent_core.pl:360` to `378`
 
 ## Current GSP Linux Findings
 
@@ -196,9 +196,9 @@ Current Linux files inspected:
 - `/home/dev/Projects/GSP/GSP-Agent-Linux/install_agent_prereqs.sh`
 - `/home/dev/Projects/GSP/GSP-Agent-Linux/install.sh`
 - `/home/dev/Projects/GSP/GSP-Agent-Linux/agent_conf.sh`
-- `/home/dev/Projects/GSP/GSP-Agent-Linux/gsp_agent_run`
-- `/home/dev/Projects/GSP/GSP-Agent-Linux/systemd/gsp_agent.service`
-- `/home/dev/Projects/GSP/GSP-Agent-Linux/gsp_agent.pl`
+- `/home/dev/Projects/GSP/GSP-Agent-Linux/agent_core_run`
+- `/home/dev/Projects/GSP/GSP-Agent-Linux/systemd/agent_core.service`
+- `/home/dev/Projects/GSP/GSP-Agent-Linux/agent_core.pl`
 - `/home/dev/Projects/GSP/GSP-Agent-Linux/docs/PANEL_INTEGRATION.md`
 - `/home/dev/Projects/GSP/GSP-Agent-Linux/documentation/agent-guide.md`
 
@@ -206,10 +206,10 @@ Divergences:
 
 - `install_agent_prereqs.sh` is GSP-specific and only supports apt/dpkg families. It is not an OGP upstream script.
 - `install.sh` is a GSP-specific installer. It defaults to user `gameserver`, install root `/home/gameserver/GSP`, runs `install_agent_prereqs.sh`, uses `rsync`, creates runtime directories, and installs a direct systemd service.
-- `systemd/gsp_agent.service` is a direct `Type=simple` service that runs `gsp_agent_run` as `{GSP_AGENT_USER}`. This intentionally diverges from OGP's SysV-plus-systemd-oneshot wrapper.
+- `systemd/agent_core.service` is a direct `Type=simple` service that runs `agent_core_run` as `{AGENT_USER}`. This intentionally diverges from OGP's SysV-plus-systemd-oneshot wrapper.
 - `agent_conf.sh` writes GSP update source fields and defaults `agent_auto_update=0`. This diverges from OGP Linux, where restart-time auto-update defaults to yes.
-- `gsp_agent_run` is a small guard and crash loop. It refuses root, requires valid config, then runs `gsp_agent.pl`; it does not implement OGP restart-time update.
-- `gsp_agent.pl` contains Panel-driven update commands, including `agent_self_update`, `component_update`, and `agent_update_status`. That is GSP-specific and should remain Panel-authoritative.
+- `agent_core_run` is a small guard and crash loop. It refuses root, requires valid config, then runs `agent_core.pl`; it does not implement OGP restart-time update.
+- `agent_core.pl` contains Panel-driven update commands, including `agent_self_update`, `component_update`, and `agent_update_status`. That is GSP-specific and should remain Panel-authoritative.
 
 Broken or incomplete items:
 
@@ -227,8 +227,8 @@ Current Windows files inspected:
 - `/home/dev/Projects/GSP/GSP-Agent-Windows/GSP64/GSP/Install/agent_start.bat`
 - `/home/dev/Projects/GSP/GSP-Agent-Windows/GSP64/GSP/Install/agent_start_cygwin.sh`
 - `/home/dev/Projects/GSP/GSP-Agent-Windows/GSP64/GSP/Cfg/bash_prefs.cfg.default`
-- `/home/dev/Projects/GSP/GSP-Agent-Windows/GSP64/GSP/gsp_agent.pl`
-- `/home/dev/Projects/GSP/GSP-Agent-Windows/bin/gsp_agent`
+- `/home/dev/Projects/GSP/GSP-Agent-Windows/GSP64/GSP/agent_core.pl`
+- `/home/dev/Projects/GSP/GSP-Agent-Windows/bin/agent_core`
 - `/home/dev/Projects/GSP/GSP-Agent-Windows/Installer/README-FIRST.txt`
 - `/home/dev/Projects/GSP/GSP-Agent-Windows/Installer/Install-GSP-WindowsAgent.ps1`
 - `/home/dev/Projects/GSP/GSP-Agent-Windows/Installer/Configure-GSP-WindowsAgent.ps1`
@@ -242,17 +242,17 @@ Current Windows files inspected:
 
 Divergences:
 
-- `GSP64/agent_start.bat` is the apparent canonical root launcher. It validates bundled Cygwin, creates default configs, requires Windows user `gameserver`, validates Perl, removes stale PID files, and runs `/GSP/gsp_agent.pl` in the same console.
+- `GSP64/agent_start.bat` is the apparent canonical root launcher. It validates bundled Cygwin, creates default configs, requires Windows user `gameserver`, validates Perl, removes stale PID files, and runs `/GSP/agent_core.pl` in the same console.
 - `GSP64/agent_start.bat` does not call `GSP64/GSP/Install/agent_start_cygwin.sh`, so the only script that implements restart-time update is not on the canonical startup path.
 - `GSP64/GSP/Install/agent_start.bat` duplicates launcher behavior and expects `/GSP/Install/agent_start_cygwin.sh`. It is not the root launcher currently documented for users.
-- `GSP64/GSP/Install/agent_start_cygwin.sh` is GSP-specific and stale. It defaults to `http://forge.runlevelsystems.com/dev/GSP.git`, branch `Panel-unstable`, and a raw path under `Agent-Windows/GSP64/GSP/gsp_agent.pl`.
+- `GSP64/GSP/Install/agent_start_cygwin.sh` is GSP-specific and stale. It defaults to `http://forge.runlevelsystems.com/dev/GSP.git`, branch `Panel-unstable`, and a raw path under `Agent-Windows/GSP64/GSP/agent_core.pl`.
 - `GSP64/GSP/Cfg/bash_prefs.cfg.default` contains the same obsolete update source defaults.
 - `Installer/Install-GSP-WindowsAgent.ps1` defaults to `https://github.com/OpenGamePanel/GSP-Agent-Windows.git` and branch `master`, not the current GSP split repo unstable branch.
 - `Installer/Install-GSP-WindowsAgent.ps1` preserves top-level paths under `$AgentDir`, while the real runtime config is under `GSP64\GSP\Cfg`.
 - `Installer/Install-GSP-WindowsAgent.ps1` creates a Scheduled Task as `SYSTEM`, while OGP's Windows installer model is based around `cyg_server` and the current root launcher expects a Windows `gameserver` user.
 - `Installer/Update-GSP-WindowsAgent.ps1` defaults to branch `master`, broadly kills host `bash` and `perl` processes, preserves the wrong top-level runtime paths, performs a hard reset, validates with `perl.exe` from PATH instead of bundled Cygwin Perl, and can report success even after validation failure.
 - `GSP64/agent_update.bat` is a custom manual git-reset helper. It targets branch `unstable`, but it depends on a Git worktree runtime and does not define a safe customer-data boundary.
-- `bin/gsp_agent` is an OGP-style wrapper renamed for GSP. It is not used by the root batch startup flow and appears obsolete unless a separate service path still calls it.
+- `bin/agent_core` is an OGP-style wrapper renamed for GSP. It is not used by the root batch startup flow and appears obsolete unless a separate service path still calls it.
 
 Broken or incomplete items:
 
@@ -293,16 +293,16 @@ Startup direction:
 1. Admin runs installer from `OGP-Agent-Linux/install.sh`.
 2. Installer runs `agent_conf.sh`.
 3. Installer installs SysV init plus systemd oneshot service.
-4. Service starts `ogp_agent_init start`.
-5. Init path starts `ogp_agent_run`.
-6. `ogp_agent_run` optionally updates source on restart.
-7. `ogp_agent_run` starts `ogp_agent.pl` and crash-restarts it.
-8. `ogp_agent.pl` registers XML-RPC methods and processes startup marker files.
+4. Service starts `agent_core_init start`.
+5. Init path starts `agent_core_run`.
+6. `agent_core_run` optionally updates source on restart.
+7. `agent_core_run` starts `agent_core.pl` and crash-restarts it.
+8. `agent_core.pl` registers XML-RPC methods and processes startup marker files.
 
 Panel direction:
 
 1. Panel calls XML-RPC command.
-2. `ogp_agent.pl` executes lifecycle, file, status, and query actions.
+2. `agent_core.pl` executes lifecycle, file, status, and query actions.
 3. Agent returns structured or scalar XML-RPC response.
 4. Panel updates UI and database state.
 
@@ -311,14 +311,14 @@ Panel direction:
 Startup direction:
 
 1. Admin runs `install.sh` or starts systemd service.
-2. `systemd/gsp_agent.service` runs `gsp_agent_run` directly as `{GSP_AGENT_USER}`.
-3. `gsp_agent_run` refuses root, validates config, and starts `gsp_agent.pl`.
-4. `gsp_agent.pl` registers XML-RPC methods and processes runtime commands.
+2. `systemd/agent_core.service` runs `agent_core_run` directly as `{AGENT_USER}`.
+3. `agent_core_run` refuses root, validates config, and starts `agent_core.pl`.
+4. `agent_core.pl` registers XML-RPC methods and processes runtime commands.
 
 Panel direction:
 
 1. Panel calls XML-RPC through `includes/lib_remote.php`.
-2. `gsp_agent.pl` executes server lifecycle, status, update, and resource commands.
+2. `agent_core.pl` executes server lifecycle, status, update, and resource commands.
 3. Agent returns XML-RPC response.
 4. Panel consumes the response through module code.
 
@@ -333,13 +333,13 @@ Startup direction:
 1. Admin installs the Easy Installer Cygwin package.
 2. Installer prepares Cygwin, dependencies, and `cyg_server`.
 3. Admin or service starts the packaged batch launcher.
-4. Batch/Cygwin path starts `OGP/ogp_agent.pl`.
-5. `ogp_agent.pl` validates non-root execution, creates runtime directories, processes startup markers, and registers XML-RPC methods.
+4. Batch/Cygwin path starts `OGP/agent_core.pl`.
+5. `agent_core.pl` validates non-root execution, creates runtime directories, processes startup markers, and registers XML-RPC methods.
 
 Panel direction:
 
 1. Panel calls XML-RPC command.
-2. `ogp_agent.pl` executes the request.
+2. `agent_core.pl` executes the request.
 3. Agent returns XML-RPC response.
 
 ### Current GSP Windows
@@ -350,13 +350,13 @@ Startup direction:
 2. Batch validates bundled Cygwin and root paths.
 3. Batch requires Windows user `gameserver`.
 4. Batch validates bundled Perl and clears stale PID files.
-5. Batch runs `bash -lc "cd /GSP && ./gsp_agent.pl -pidfile /GSP/gsp_agent_run.pid"`.
-6. `gsp_agent.pl` registers XML-RPC methods and processes runtime commands.
+5. Batch runs `bash -lc "cd /GSP && ./agent_core.pl -pidfile /GSP/agent_core_run.pid"`.
+6. `agent_core.pl` registers XML-RPC methods and processes runtime commands.
 
 Panel direction:
 
 1. Panel calls XML-RPC through `includes/lib_remote.php`.
-2. `GSP64/GSP/gsp_agent.pl` executes server lifecycle, status, update, and resource commands.
+2. `GSP64/GSP/agent_core.pl` executes server lifecycle, status, update, and resource commands.
 3. Agent returns XML-RPC response.
 
 Gap:
@@ -378,7 +378,7 @@ Gap:
 ### Linux Target
 
 - Keep the split `GSP-Agent-Linux` repository and direct systemd service model if this remains the intended GSP architecture.
-- Make `gsp_agent_run` the single canonical service/manual foreground wrapper.
+- Make `agent_core_run` the single canonical service/manual foreground wrapper.
 - Explicitly implement or explicitly remove restart-time auto-update support. If implemented, it should be GSP-specific, default off unless product policy changes, and preserve only source-managed files while excluding runtime/customer paths.
 - Keep Panel-driven `agent_self_update` as the primary admin update mechanism because it stages, backs up, restarts, health-checks, and rolls back.
 - Document the root guard as a deliberate GSP safety behavior.
@@ -389,7 +389,7 @@ Gap:
 - Make `GSP64/agent_start.bat` the single canonical user-facing launcher.
 - Either inline the validated Cygwin helper behavior into the root launcher path or make the root launcher call exactly one maintained Cygwin startup helper.
 - Retire or quarantine duplicate launchers and obsolete wrappers after the canonical path is implemented.
-- Replace obsolete update defaults with the current `GSP-Agent-Windows` repo, branch `unstable`, and a valid path to `GSP64/GSP/gsp_agent.pl`.
+- Replace obsolete update defaults with the current `GSP-Agent-Windows` repo, branch `unstable`, and a valid path to `GSP64/GSP/agent_core.pl`.
 - Decide one service account model. The current candidates are OGP-style `cyg_server`, GSP-style `gameserver`, or Windows Scheduled Task `SYSTEM`; they must not coexist silently.
 - Rework PowerShell install/update scripts to preserve real runtime paths under `GSP64\GSP`, validate with bundled Cygwin Perl, avoid host-wide process kills, and health-check the XML-RPC endpoint after restart.
 - Treat any restart-time Windows update helper as GSP packaging, not verified OGP upstream behavior, unless the matching Easy Installer source is later verified.

@@ -1,11 +1,11 @@
 use strict;
 use warnings;
 # Checks the Linux restic argv allowlist against the same rules the Windows agent uses.
-# It extracts the path and argv subs from gsp_agent.pl, so it runs without the agent's CPAN modules.
-my $src_file = shift @ARGV or die "usage: validate_restic_argv_allowlist.pl gsp_agent.pl\n";
+# It extracts the path and argv subs from agent_core.pl, so it runs without the agent's CPAN modules.
+my $src_file = shift @ARGV or die "usage: validate_restic_argv_allowlist.pl agent_core.pl\n";
 open my $fh, '<', $src_file or die "open: $!";
 my $src = do { local $/; <$fh> };
-delete $ENV{GSE_GAME_HOME_ROOT};    # test the default root
+delete $ENV{GAME_HOME_ROOT};    # test the default root
 my ($const) = $src =~ /(use constant RESTIC_HOME_ROOT\s*=>[^;]*;)/ or die "no RESTIC_HOME_ROOT";
 my ($subs) = $src =~ /(^\s*sub restic_arg_home_path_ok\b.*?)(?=^\s*sub restic_job_env_ok\b)/ms or die "no subs block";
 my $code = "package T; use strict; use warnings; $const\n$subs\n1;\n";

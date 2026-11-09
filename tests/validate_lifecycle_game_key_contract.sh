@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-agent="$repo_root/gsp_agent.pl"
+agent="$repo_root/agent_core.pl"
 
 fail() {
 	echo "FAIL: $*" >&2
@@ -274,7 +274,7 @@ sub safe_game_key {
 		my ($self) = @_;
 		my @bad = grep {
 			index($_, "$self->{game_root}/") == 0 &&
-			$_ =~ m{/(?:serverStart\.sh|status\.(?:running|stopped)|watchdog\.pid|bot\.pid|game\.pid|bot\.def|_gsp_content|secure\.sh|preinstall\.sh|postinstall\.sh|runinstall\.sh)$}
+			$_ =~ m{/(?:serverStart\.sh|status\.(?:running|stopped)|watchdog\.pid|bot\.pid|game\.pid|bot\.def|_game_content|secure\.sh|preinstall\.sh|postinstall\.sh|runinstall\.sh)$}
 		} keys %{$self->{files}};
 		return @bad;
 	}
@@ -390,8 +390,8 @@ require_text 'Skipping automatic startup for HOME ID:$home_id because desired st
 require_text 'prepare_server_content_runtime_without_decrypt($home_path);'
 require_text 'create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);'
 require_text 'backup_home_log( $home_id, $log_file, $game_root . "/" . $console_log );'
-require_text '$startup_cmd = replace_GSP_Env_Vars($screen_id, $home_id, $game_root, $startup_cmd, $game_key);'
-require_text '$line = replace_GSP_Env_Vars("", $home_id, $game_root, $line, $game_key);'
+require_text '$startup_cmd = replace_Env_Vars($screen_id, $home_id, $game_root, $startup_cmd, $game_key);'
+require_text '$line = replace_Env_Vars("", $home_id, $game_root, $line, $game_key);'
 require_text 'run_before_start_commands($home_id, $home_path, $preStart, $owner);'
 require_text 'my $server_start_bashfile = "$home_path/serverStart.sh";'
 require_text 'return ("$home_path/status.running", "$home_path/status.stopped");'

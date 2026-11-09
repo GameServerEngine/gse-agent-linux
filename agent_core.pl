@@ -83,7 +83,7 @@ use constant PORT_CHECK_INTERVAL_SECONDS =>
   defined($Cfg::Preferences{PortCheckIntervalSeconds}) ? $Cfg::Preferences{PortCheckIntervalSeconds} : 5;
 use constant LINUX_USER_PER_GAME_SERVER  => $Cfg::Preferences{linux_user_per_game_server};
 use constant AGENT_PID_FILE =>
-  Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent.pid');
+  Path::Class::File->new(AGENT_RUN_DIR, 'agent_core.pid');
 use constant AGENT_RSYNC_GENERIC_LOG =>
   Path::Class::File->new(AGENT_RUN_DIR, 'rsync_update_generic.log');
 use constant STEAM_LICENSE_OK => "Accept";
@@ -104,20 +104,20 @@ use constant AGENT_EVENTS_DIR =>
 use constant AGENT_EVENT_QUEUE_FILE =>
 	Path::Class::File->new(AGENT_EVENTS_DIR, 'pending-events.jsonl');
 use constant AGENT_UPDATE_STATE_FILE =>
-	Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent_update_state.json');
+	Path::Class::File->new(AGENT_RUN_DIR, 'agent_core_update_state.json');
 use constant AGENT_UPDATE_REQUEST_FILE =>
-	Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent_update_request.json');
+	Path::Class::File->new(AGENT_RUN_DIR, 'agent_core_update_request.json');
 use constant AGENT_UPDATE_LOG_FILE =>
-	Path::Class::File->new(AGENT_RUN_DIR, 'gsp_agent_update.log');
+	Path::Class::File->new(AGENT_RUN_DIR, 'agent_core_update.log');
 use constant SCREENRC_FILE =>
-  Path::Class::File->new(AGENT_RUN_DIR, 'gsp_screenrc');
+  Path::Class::File->new(AGENT_RUN_DIR, 'screen_config');
 use constant SCREENRC_FILE_BK =>
-  Path::Class::File->new(AGENT_RUN_DIR, 'gsp_screenrc_bk');
+  Path::Class::File->new(AGENT_RUN_DIR, 'screen_config_bk');
 use constant SCREENRC_TMP_FILE =>
-  Path::Class::File->new(AGENT_RUN_DIR, 'gsp_screenrc.tmp');
+  Path::Class::File->new(AGENT_RUN_DIR, 'screen_config.tmp');
 use constant SCREEN_TYPE_HOME   => "HOME";
 use constant SCREEN_TYPE_UPDATE => "UPDATE";
-use constant SERVER_RUNNER_USER => "gsp_server_runner";
+use constant SERVER_RUNNER_USER => "server_runner";
 use constant FD_DIR => Path::Class::Dir->new(AGENT_RUN_DIR, 'FastDownload');
 use constant FD_ALIASES_DIR => Path::Class::Dir->new(FD_DIR, 'aliases');
 use constant FD_PID_FILE => Path::Class::File->new(FD_DIR, 'fd.pid');
@@ -202,7 +202,7 @@ sub agent_event_panel_url
 	if(defined($Cfg::Config{web_api_url}) && $Cfg::Config{web_api_url} ne "")
 	{
 		my $url = $Cfg::Config{web_api_url};
-		$url =~ s/gsp_api\.php(?:\?.*)?$/agent_event_receiver.php/;
+		$url =~ s/api\.php(?:\?.*)?$/agent_event_receiver.php/;
 		return $url if($url =~ /agent_event_receiver\.php$/);
 		$url =~ s/\/+$//;
 		return "$url/agent_event_receiver.php";
@@ -222,15 +222,15 @@ sub prepare_server_content_runtime_without_decrypt
 	my ($home_path) = @_;
 	return if(!defined($home_path) || $home_path eq "");
 	foreach my $dir (
-		"$home_path/_gsp_content",
-		"$home_path/_gsp_content/hooks",
-		"$home_path/_gsp_content/generated",
-		"$home_path/_gsp_content/runtime"
+		"$home_path/_game_content",
+		"$home_path/_game_content/hooks",
+		"$home_path/_game_content/generated",
+		"$home_path/_game_content/runtime"
 	)
 	{
 		mkpath($dir) if(!-d $dir);
 	}
-	my $pid_file = "$home_path/_gsp_content/runtime/server_content.pids";
+	my $pid_file = "$home_path/_game_content/runtime/server_content.pids";
 	if(!-e $pid_file && open(my $fh, '>', $pid_file))
 	{
 		close($fh);
@@ -255,7 +255,7 @@ sub import_legacy_also_run_pids_without_decrypt
 	my ($home_path) = @_;
 	return if(!defined($home_path) || $home_path eq "");
 	prepare_server_content_runtime_without_decrypt($home_path);
-	my $pid_file = "$home_path/_gsp_content/runtime/server_content.pids";
+	my $pid_file = "$home_path/_game_content/runtime/server_content.pids";
 	my %seen;
 	foreach my $legacy_pid_file ("$home_path/_alsoRun.pid", bsd_glob("$home_path/*/_alsoRun.pid"))
 	{
@@ -324,7 +324,7 @@ sub cleanup_server_content_hooks_without_decrypt
 	my ($home_path, $as_user) = @_;
 	return if(!defined($home_path) || $home_path eq "");
 	import_legacy_also_run_pids_without_decrypt($home_path);
-	my $pid_file = "$home_path/_gsp_content/runtime/server_content.pids";
+	my $pid_file = "$home_path/_game_content/runtime/server_content.pids";
 	cleanup_server_content_pid_group_without_decrypt($pid_file, "watchdog", $as_user);
 	cleanup_server_content_pid_group_without_decrypt($pid_file, "app", $as_user);
 }
@@ -776,10 +776,10 @@ if(-e Path::Class::File->new(FD_DIR, 'Settings.pm'))
 	# Its state stays in the job directory until the panel reads it. A job whose
 	# supervisor is gone and that has no recorded result is reported as 'lost'.
 	# ---------------------------------------------------------------------------
-	use constant RESTIC_JOB_ROOT    => ($ENV{GSE_RESTIC_JOB_ROOT} || '/var/lib/gse-agent/restic-jobs');
+	use constant RESTIC_JOB_ROOT    => ($ENV{RESTIC_JOB_ROOT} || '/var/lib/gse-agent/restic-jobs');
 	use constant RESTIC_OUTPUT_TAIL => 65536;
-	# Game server folders live under this root: <root>/<digits>. Set GSE_GAME_HOME_ROOT for another layout.
-	use constant RESTIC_HOME_ROOT   => ($ENV{GSE_GAME_HOME_ROOT} || '/home/gameserver');
+	# Game server folders live under this root: <root>/<digits>. Set GAME_HOME_ROOT for another layout.
+	use constant RESTIC_HOME_ROOT   => ($ENV{GAME_HOME_ROOT} || '/home/gameserver');
 
 	my %RESTIC_ENV_KEYS = map { $_ => 1 } qw(RESTIC_REPOSITORY RESTIC_PASSWORD);
 
@@ -823,7 +823,7 @@ if(-e Path::Class::File->new(FD_DIR, 'Settings.pm'))
 
 	sub restic_bin_path
 	{
-		return $ENV{GSE_RESTIC_BIN} if ($ENV{GSE_RESTIC_BIN} && -f $ENV{GSE_RESTIC_BIN} && -x $ENV{GSE_RESTIC_BIN});
+		return $ENV{RESTIC_BIN} if ($ENV{RESTIC_BIN} && -f $ENV{RESTIC_BIN} && -x $ENV{RESTIC_BIN});
 		foreach my $candidate ('/usr/local/bin/restic', '/usr/bin/restic')
 		{
 			return $candidate if (-f $candidate && -x $candidate);
@@ -1293,7 +1293,7 @@ sub create_screen_id
 sub create_screen_cmd
 {
 	my ($screen_id, $exec_cmd) = @_;
-	$exec_cmd = replace_GSP_Env_Vars($screen_id, "", "", $exec_cmd);
+	$exec_cmd = replace_Env_Vars($screen_id, "", "", $exec_cmd);
 	return
 	  sprintf('export WINEDEBUG="fixme-all" && export DISPLAY=:1 && screen -d -m -t "%1$s" -c ' . SCREENRC_FILE . ' -S %1$s %2$s',
 			  $screen_id, $exec_cmd);
@@ -1312,7 +1312,7 @@ sub create_screen_cmd_loop
 {
 	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file, $home_path, $game_workdir) = @_;
 
-	$exec_cmd = replace_GSP_Env_Vars($screen_id, "", "", $exec_cmd);
+	$exec_cmd = replace_Env_Vars($screen_id, "", "", $exec_cmd);
 	$home_path = "." unless(defined($home_path) && $home_path ne "");
 	$game_workdir = "." unless(defined($game_workdir) && $game_workdir ne "");
 
@@ -1516,8 +1516,8 @@ sub create_screen_cmd_loop
 sub handle_lock_command_line{
 	my ($command) = @_;
 	if(defined $command && $command ne ""){
-		if ($command =~ m/{GSP_LOCK_FILE}/) {
-			$command =~ s/{GSP_LOCK_FILE}\s*//g;
+		if ($command =~ m/{LOCK_FILE}/) {
+			$command =~ s/{LOCK_FILE}\s*//g;
 			return secure_path_without_decrypt("chattr+i", $command);
 		}
 	}
@@ -1525,7 +1525,7 @@ sub handle_lock_command_line{
 	return 0;
 }
 
-sub replace_GSP_Env_Vars{
+sub replace_Env_Vars{
 	# This function replaces constants from environment variables set in the XML
 	my ($screen_id, $homeid, $homepath, $exec_cmd, $game_key) = @_;
 
@@ -1539,7 +1539,7 @@ sub replace_GSP_Env_Vars{
 		# If the install file exists, the game can be auto updated, else it will be ignored by the game for improper syntax
 		# To generate the install file, the "Install/Update via Steam" button must be clicked on at least once!
 		if(-e $fullPath){
-			$exec_cmd =~ s/{GSP_STEAM_CMD_DIR}/$steamCMDPath/g;
+			$exec_cmd =~ s/{STEAM_CMD_DIR}/$steamCMDPath/g;
 			$exec_cmd =~ s/{STEAMCMD_INSTALL_FILE}/$steamInsFile/g;
 		}
 	}
@@ -1547,7 +1547,7 @@ sub replace_GSP_Env_Vars{
 
 	# Handle home directory replacement
 	if(defined $homepath && $homepath ne ""){
-		$exec_cmd =~ s/{GSP_HOME_DIR}/$homepath/g;
+		$exec_cmd =~ s/{GAME_HOME_DIR}/$homepath/g;
 	}
 
 	# Handle global game shared directory replacement
@@ -1559,7 +1559,7 @@ sub replace_GSP_Env_Vars{
 		{
 			logger "Could not create " . $shared_path . " directory $!.", 1;
 		}
-		$exec_cmd =~ s/{GSP_GAME_SHARED_DIR}/$shared_path/g;
+		$exec_cmd =~ s/{GAME_SHARED_DIR}/$shared_path/g;
 	}
 
 	return $exec_cmd;
@@ -1935,7 +1935,7 @@ sub process_is_protected_without_decrypt
 	my $comm = proc_comm_without_decrypt($pid);
 	my $cmdline = proc_cmdline_without_decrypt($pid);
 	return 1 if($comm =~ /^(systemd|init|sshd|ssh|NetworkManager|systemd-networkd|systemd-resolved|dbus-daemon|sudo|su)$/);
-	return 1 if($cmdline =~ /\b(?:gsp_agent\.pl|gsp_agent_run|systemctl|apt|apt-get|dpkg|sshd|NetworkManager|systemd-networkd|systemd-resolved)\b/);
+	return 1 if($cmdline =~ /\b(?:agent_core\.pl|agent_core_run|systemctl|apt|apt-get|dpkg|sshd|NetworkManager|systemd-networkd|systemd-resolved)\b/);
 	return 0;
 }
 
@@ -2770,7 +2770,7 @@ sub universal_start_without_decrypt
 		my @prestartenvvars = split /[\r\n]+/, $envVars;
 		my $envVarStr = "";
 		foreach my $line (@prestartenvvars) {
-			$line = replace_GSP_Env_Vars("", $home_id, $game_root, $line, $game_key);
+			$line = replace_Env_Vars("", $home_id, $game_root, $line, $game_key);
 			if($line ne ""){
 				logger "Configuring environment variable: $line";
 				$envVarStr .= "$line\n";
@@ -2811,7 +2811,7 @@ sub universal_start_without_decrypt
 		my @prestart_lines = split /[\r\n]+/, $preStart;
 		my $prestart_str = "";
 		foreach my $line (@prestart_lines) {
-			$line = replace_GSP_Env_Vars("", $home_id, $game_root, $line, $game_key);
+			$line = replace_Env_Vars("", $home_id, $game_root, $line, $game_key);
 			$prestart_str .= "$line\n" if($line ne "");
 		}
 		$preStart = $prestart_str if($prestart_str ne "");
@@ -2834,7 +2834,7 @@ sub universal_start_without_decrypt
 	prepare_server_content_runtime_without_decrypt($home_path);
 
 	# Replace any GSP compatibility variables found in the command line
-	$startup_cmd = replace_GSP_Env_Vars($screen_id, $home_id, $game_root, $startup_cmd, $game_key);
+	$startup_cmd = replace_Env_Vars($screen_id, $home_id, $game_root, $startup_cmd, $game_key);
 
 	if($file_extension eq ".exe" or $file_extension eq ".bat")
 	{
@@ -2845,7 +2845,7 @@ sub universal_start_without_decrypt
 			$command = "taskset -c $cpu wine $server_exe $startup_cmd";
 		}
 
-		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
+		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
@@ -2860,7 +2860,7 @@ sub universal_start_without_decrypt
 			$command = "taskset -c $cpu $startup_cmd";
 		}
 
-		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
+		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
@@ -2875,7 +2875,7 @@ sub universal_start_without_decrypt
 			$command = "taskset -c $cpu ./$server_exe $startup_cmd";
 		}
 
-		if(preference_enabled('gsp_autorestart_server', 'gsp_autorestart_server', '1')){
+		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
 		}else{
 			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
@@ -3917,7 +3917,7 @@ sub lock_additional_files_logic{
 
 	my $commandStr = "";
 	$filesToLock = startup_comma_format_to_multiline($filesToLock);
-	$filesToLock = replace_GSP_Env_Vars("", "", $homedir, $filesToLock);
+	$filesToLock = replace_Env_Vars("", "", $homedir, $filesToLock);
 	my @filesToProcess = split /[\r\n]+/, $filesToLock;
 	foreach my $line (@filesToProcess) {
 		my $fullPath = $homedir . "/" . $line;
@@ -5008,7 +5008,7 @@ sub create_resource_stats_tables
 	my ($dbh) = @_;
 	my $table_prefix = STATS_TABLE_PREFIX || 'gsp_';
 
-	# Create gsp_machines table
+	# Create agent_machines table
 	my $machines_sql = qq{
 		CREATE TABLE IF NOT EXISTS `${table_prefix}machines` (
 			`id` int(11) NOT NULL AUTO_INCREMENT,
@@ -5021,7 +5021,7 @@ sub create_resource_stats_tables
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 	};
 
-	# Create gsp_machine_samples table
+	# Create machine_samples table
 	my $machine_samples_sql = qq{
 		CREATE TABLE IF NOT EXISTS `${table_prefix}machine_samples` (
 			`id` bigint(20) NOT NULL AUTO_INCREMENT,
@@ -5050,7 +5050,7 @@ sub create_resource_stats_tables
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 	};
 
-	# Create gsp_process_samples table
+	# Create process_samples table
 	my $process_samples_sql = qq{
 		CREATE TABLE IF NOT EXISTS `${table_prefix}process_samples` (
 			`id` bigint(20) NOT NULL AUTO_INCREMENT,
@@ -5241,12 +5241,12 @@ sub collect_and_insert_process_samples
 		chomp($session);
 		next unless $session;
 
-		# Extract server name from screen session name (format: GSP_HOME_000001518 or similar)
+		# Extract server name from screen session name (format: GAME_HOME_000001518 or similar)
 		my $server_name = $session;
 		my $server_path = '/';
 
 		# Try to extract home_id from GSP screen session and map to server_id
-		if ($session =~ /GSP_HOME_0*(\d+)/) {
+		if ($session =~ /GAME_HOME_0*(\d+)/) {
 			my $home_id = $1;
 			if (exists $home_id_to_server_id{$home_id}) {
 				$server_name = $home_id_to_server_id{$home_id};  # Use actual server ID
@@ -5878,7 +5878,7 @@ sub ftp_mgr
 	$password =~ s/('+)/'\"$1\"'/g;
 	$home_path =~ s/('+)/'\"$1\"'/g;
 
-	if(preference_enabled('gsp_manages_ftp', 'gsp_manages_ftp', '1')){
+	if(preference_enabled('manages_ftp', 'manages_ftp', '1')){
 		if( defined($Cfg::Preferences{ftp_method}) && $Cfg::Preferences{ftp_method} eq "IspConfig")
 		{
 			use constant ISPCONFIG_DIR => Path::Class::Dir->new(AGENT_RUN_DIR, 'IspConfig');
@@ -6584,7 +6584,7 @@ sub agent_self_update
 
 	my $ts = time();
 	my $update_id = "restart-$ts";
-	my $revision_file = Path::Class::File->new(AGENT_RUN_DIR, '.gsp_agent_source_revision')->stringify;
+	my $revision_file = Path::Class::File->new(AGENT_RUN_DIR, '.agent_core_source_revision')->stringify;
 	my $current_commit = agent_read_first_line($revision_file);
 	$current_commit =~ s/\s+$//;
 	my %request = (
@@ -6718,8 +6718,8 @@ sub component_update
 	}
 
 	my $ts = time();
-	my $script_path = Path::Class::File->new(AGENT_RUN_DIR, "gsp_component_update_$ts.sh")->stringify;
-	my $log_path = Path::Class::File->new(AGENT_RUN_DIR, 'gsp_component_update.log')->stringify;
+	my $script_path = Path::Class::File->new(AGENT_RUN_DIR, "component_update_$ts.sh")->stringify;
+	my $log_path = Path::Class::File->new(AGENT_RUN_DIR, 'component_update.log')->stringify;
 	my $screenrc = SCREENRC_FILE;
 	my $repo_q = component_update_shell_quote($repo_url);
 	my $branch_q = component_update_shell_quote($branch);
@@ -6744,7 +6744,7 @@ DEST=$install_q
 GIT_BIN=$git_q
 BACKUP_BASE=$backup_q
 POST_UPDATE=$post_q
-TMP="\${TMPDIR:-/tmp}/gsp_agent_update_\$(date +%s)_\$\$"
+TMP="\${TMPDIR:-/tmp}/agent_core_update_\$(date +%s)_\$\$"
 mkdir -p "\$TMP" "\$BACKUP_BASE" || fail "Cannot create staging or backup directories"
 log "queued component=$component repo=\$REPO branch=\$BRANCH source=\$SOURCE_REL dest=\$DEST"
 if ! command -v "\$GIT_BIN" >/dev/null 2>&1 && [ ! -x "\$GIT_BIN" ]; then
@@ -6778,25 +6778,25 @@ if [ "$component" = "linux_agent" ]; then
   done
   chmod +x "\$DEST/steamcmd/steamcmd.sh" "\$DEST/steamcmd/linux32/steamcmd" 2>/dev/null || true
 fi
-if [ -f "\$DEST/gsp_agent.pl" ]; then
-  perl -c "\$DEST/gsp_agent.pl" >> "\$LOG" 2>&1 || fail "Updated gsp_agent.pl failed syntax validation"
+if [ -f "\$DEST/agent_core.pl" ]; then
+  perl -c "\$DEST/agent_core.pl" >> "\$LOG" 2>&1 || fail "Updated agent_core.pl failed syntax validation"
 fi
 if [ -n "\$POST_UPDATE" ]; then
   (cd "\$DEST" && bash -lc "\$POST_UPDATE") >> "\$LOG" 2>&1 || fail "post-update command failed"
 fi
 log "copy complete archive=\$ARCHIVE"
 sleep 2
-if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^gsp_agent\\.service'; then
-  systemctl restart gsp_agent.service >> "\$LOG" 2>&1 && exit 0
+if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^agent_core\\.service'; then
+  systemctl restart agent_core.service >> "\$LOG" 2>&1 && exit 0
 fi
 cd "\$DEST" || exit 0
-if [ -f gsp_agent_run.pid ]; then kill "\$(cat gsp_agent_run.pid)" >/dev/null 2>&1 || true; fi
-if [ -f gsp_agent.pid ]; then kill "\$(cat gsp_agent.pid)" >/dev/null 2>&1 || true; fi
+if [ -f agent_core_run.pid ]; then kill "\$(cat agent_core_run.pid)" >/dev/null 2>&1 || true; fi
+if [ -f agent_core.pid ]; then kill "\$(cat agent_core.pid)" >/dev/null 2>&1 || true; fi
 sleep 2
-if [ -f gsp_agent_run ]; then
-  screen -d -m -t "gsp_agent" -c $screenrc_q -S gsp_agent bash gsp_agent_run -pidfile gsp_agent_run.pid >> "\$LOG" 2>&1 || true
+if [ -f agent_core_run ]; then
+  screen -d -m -t "agent_core" -c $screenrc_q -S agent_core bash agent_core_run -pidfile agent_core_run.pid >> "\$LOG" 2>&1 || true
 else
-  screen -d -m -t "gsp_agent" -c $screenrc_q -S gsp_agent perl gsp_agent.pl >> "\$LOG" 2>&1 || true
+  screen -d -m -t "agent_core" -c $screenrc_q -S agent_core perl agent_core.pl >> "\$LOG" 2>&1 || true
 fi
 log "restart attempted"
 rm -rf "\$TMP"
@@ -6827,9 +6827,9 @@ sub agent_restart
 	if ($dec_check eq 'restart')
 	{
 		chdir AGENT_RUN_DIR;
-			if(-e "gsp_agent_run.pid")
+			if(-e "agent_core_run.pid")
 			{
-				my $run_pid_file = "gsp_agent_run.pid";
+				my $run_pid_file = "agent_core_run.pid";
 			my $init_pid	= `cat $run_pid_file`;
 			chomp($init_pid);
 
@@ -6837,10 +6837,10 @@ sub agent_restart
 			{
 				my $or_exist	= "";
 				my $rm_pid_file	= "";
-				if(-e "gsp_agent.pid")
+				if(-e "agent_core.pid")
 				{
-					$rm_pid_file	= " gsp_agent.pid";
-					my $agent_pid	= `cat gsp_agent.pid`;
+					$rm_pid_file	= " agent_core.pid";
+					my $agent_pid	= `cat agent_core.pid`;
 					chomp($agent_pid);
 					if( kill 0, $agent_pid )
 					{
@@ -6852,10 +6852,10 @@ sub agent_restart
 				my $restart = "echo -n \"Stopping GSE Agent...\"\n".
 							  "kill $init_pid\n".
 							  "while [ -e /proc/$init_pid $or_exist ];do echo -n .;sleep 1;done\n".
-								  "rm -f gsp_agent_run.pid $rm_pid_file\necho \" [OK]\"\n".
+								  "rm -f agent_core_run.pid $rm_pid_file\necho \" [OK]\"\n".
 							  "echo -n \"Starting GSE Agent...\"\n".
-							  "screen -d -m -t \"gsp_agent\" -c \"" . SCREENRC_FILE . "\" -S gsp_agent bash gsp_agent_run -pidfile gsp_agent_run.pid\n".
-							  "while [ ! -e gsp_agent_run.pid -o ! -e gsp_agent.pid ];do echo -n .;sleep 1;done\n".
+							  "screen -d -m -t \"agent_core\" -c \"" . SCREENRC_FILE . "\" -S agent_core bash agent_core_run -pidfile agent_core_run.pid\n".
+							  "while [ ! -e agent_core_run.pid -o ! -e agent_core.pid ];do echo -n .;sleep 1;done\n".
 							  "echo \" [OK]\"\n".
 							  "rm -f tmp_restart.sh\n".
 							  "exit 0\n";
@@ -7769,7 +7769,7 @@ sub	generate_post_install_scripts
 							 "workshop_status_path=\"$mods_full_path/WorkshopInstallStatus.json\"\n".
 							 "write_workshop_status(){ status=\"\$1\"; message=\"\$2\"; now=\"\$(date '+%Y-%m-%d %H:%M:%S')\"; message_json=\$(printf '%s' \"\$message\"|sed 's/\\\\/\\\\\\\\/g;s/\"/\\\\\"/g'); printf '{\"operation\":\"steam_workshop\",\"home_id\":\"%s\",\"workshop_app_id\":\"%s\",\"status\":\"%s\",\"message\":\"%s\",\"updated_at\":\"%s\"}\\n' \"\$home_id\" \"\$workshop_id\" \"\$status\" \"\$message_json\" \"\$now\" > \"\$workshop_status_path\"; }\n".
 							 "write_workshop_status running \"Workshop install running\"\n".
-							 "trap 'rc=\$?; if [ \$rc -ne 0 ]; then write_workshop_status failed \"Workshop install failed\"; echo GSP_WORKSHOP_INSTALL_FAILED; fi' EXIT\n";
+							 "trap 'rc=\$?; if [ \$rc -ne 0 ]; then write_workshop_status failed \"Workshop install failed\"; echo WORKSHOP_INSTALL_FAILED; fi' EXIT\n";
 	my @workshop_mods = split /,/, $mods_list;
 	my @mod_names = split /,/, $mod_names_list;
 
@@ -7866,7 +7866,7 @@ sub	generate_post_install_scripts
 							 'done'."\n".
 							 'write_workshop_status completed "Workshop install completed"'."\n".
 							 'trap - EXIT'."\n".
-							 'echo GSP_WORKSHOP_INSTALL_COMPLETE'."\n";
+							 'echo WORKSHOP_INSTALL_COMPLETE'."\n";
 	return "$post_install_scripts";
 }
 

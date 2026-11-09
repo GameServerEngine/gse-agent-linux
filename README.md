@@ -5,12 +5,12 @@ Perl-based Linux execution agent for GameServer Engine (GSE). The agent receives
 ## Default Layout
 
 - install directory: `/home/gameserver/GSP`
-- run script: `gsp_agent_run`
-- systemd service: `gsp_agent.service`
+- run script: `agent_core_run`
+- systemd service: `agent_core.service`
 - config directory: `/home/gameserver/GSP/Cfg/`
-- main log: `/home/gameserver/GSP/gsp_agent.log`
+- main log: `/home/gameserver/GSP/agent_core.log`
 - screen logs: `/home/gameserver/GSP/screenlogs/`
-- server-content runtime: `/home/gameserver/GSP/_gsp_content/`
+- server-content runtime: `/home/gameserver/GSP/_game_content/`
 - SteamCMD bootstrap: `/home/gameserver/GSP/steamcmd/steamcmd.sh`
 
 Legacy `GSP` script names, default paths, config keys, RPC headers, screen-session prefixes, and Workshop markers are retained only where the Panel or older installs may still expect them.
@@ -18,7 +18,7 @@ Legacy `GSP` script names, default paths, config keys, RPC headers, screen-sessi
 ## Guided Install
 
 ```bash
-chmod +x install_agent_prereqs.sh install.sh agent_conf.sh gsp_agent_run
+chmod +x install_agent_prereqs.sh install.sh agent_conf.sh agent_core_run
 sudo ./install_agent_prereqs.sh
 sudo ./install.sh
 ```
@@ -53,10 +53,10 @@ Install, repair, and restart-time update preserve an existing installed `steamcm
 ## Service Commands
 
 ```bash
-sudo systemctl status gsp_agent
-sudo journalctl -u gsp_agent -f
-sudo systemctl restart gsp_agent
-tail -f /home/gameserver/GSP/gsp_agent.log
+sudo systemctl status agent_core
+sudo journalctl -u agent_core -f
+sudo systemctl restart agent_core
+tail -f /home/gameserver/GSP/agent_core.log
 ```
 
 ## Manual Configuration
@@ -71,7 +71,7 @@ Generated files:
 - `Cfg/Preferences.pm`
 - `Cfg/bash_prefs.cfg`
 
-`Cfg/bash_prefs.cfg` controls whether queued restart-time updates may run. The running agent records `agent_self_update` requests as pending state, and `gsp_agent_run` applies them from the requested Git repo, branch, and source path before the agent starts. The service and foreground wrapper both use `gsp_agent_run`; the wrapper refuses duplicate startup when the configured agent port or a valid wrapper lock is already active.
+`Cfg/bash_prefs.cfg` controls whether queued restart-time updates may run. The running agent records `agent_self_update` requests as pending state, and `agent_core_run` applies them from the requested Git repo, branch, and source path before the agent starts. The service and foreground wrapper both use `agent_core_run`; the wrapper refuses duplicate startup when the configured agent port or a valid wrapper lock is already active.
 
 ## Documentation
 

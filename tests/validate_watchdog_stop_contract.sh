@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-agent="$repo_root/gsp_agent.pl"
+agent="$repo_root/agent_core.pl"
 
 fail() {
 	echo "FAIL: $*" >&2

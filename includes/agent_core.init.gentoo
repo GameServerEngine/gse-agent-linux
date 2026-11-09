@@ -1,0 +1,24 @@
+#!/sbin/runscript
+
+# Distributed under the terms of the GNU General Public License v2
+
+# GF: Config is in $agent_dir/Cfg/Config.pm
+
+agent_dir=AGENT_DIR
+agent_user=AGENT_USER
+
+depend() {
+	need net
+}
+
+start() {
+	ebegin "Starting GSE Agent"
+        start-stop-daemon --verbose --chdir $agent_dir --start --background --user $agent_user -e PWD="$agent_dir" --exec screen -d -m -t agent_core -c screen_config -S agent_core ./agent_core_run -pidfile agent_core_run.pid
+        eend $? "Failed to start GSE Agent"
+}
+
+stop() {
+	ebegin "Stopping GSE Agent"
+	start-stop-daemon --stop --quiet --pidfile $agent_dir/agent_core_run.pid
+	eend $? "Failed to stop GSE Agent"
+}

@@ -1,5 +1,5 @@
 %Cfg::Config = (
-	logfile => '/home/gameserver/GSP/gsp_agent.log',
+	logfile => '/home/gameserver/GSP/agent_core.log',
 	listen_port => '12679',
 	listen_ip => '0.0.0.0',
 	version => 'v1.4',

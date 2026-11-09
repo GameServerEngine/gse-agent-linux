@@ -25,30 +25,27 @@ SET time_zone = "+00:00";
 -- --------------------------------------------------------
 
 --
--- Table structure for table `gsp_machine_samples`
+-- Table structure for table `process_samples`
 --
 
-CREATE TABLE `gsp_machine_samples` (
+CREATE TABLE `process_samples` (
   `id` bigint(20) NOT NULL,
   `machine_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
   `ts` datetime NOT NULL,
-  `load1` decimal(6,2) DEFAULT NULL,
-  `load5` decimal(6,2) DEFAULT NULL,
-  `load15` decimal(6,2) DEFAULT NULL,
-  `cpu_pct` decimal(6,2) DEFAULT NULL,
-  `mem_used_bytes` bigint(20) DEFAULT NULL,
-  `mem_total_bytes` bigint(20) DEFAULT NULL,
-  `mem_used_pct` decimal(6,2) DEFAULT NULL,
-  `swap_used_bytes` bigint(20) DEFAULT NULL,
-  `swap_total_bytes` bigint(20) DEFAULT NULL,
-  `disk_path` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `disk_total_bytes` bigint(20) DEFAULT NULL,
-  `disk_used_bytes` bigint(20) DEFAULT NULL,
-  `disk_used_pct` decimal(6,2) DEFAULT NULL,
-  `net_iface` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `rx_bytes` bigint(20) DEFAULT NULL,
-  `tx_bytes` bigint(20) DEFAULT NULL,
-  `iface_speed_mbps` int(11) DEFAULT NULL
+  `server_name` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `server_path` varchar(512) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `pid` int(11) NOT NULL,
+  `proc_name` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `cmd` text COLLATE utf8mb4_unicode_ci,
+  `cpu_pct` decimal(7,2) DEFAULT NULL,
+  `rss_bytes` bigint(20) DEFAULT NULL,
+  `vms_bytes` bigint(20) DEFAULT NULL,
+  `mem_pct` decimal(6,2) DEFAULT NULL,
+  `io_read_bytes` bigint(20) DEFAULT NULL,
+  `io_write_bytes` bigint(20) DEFAULT NULL,
+  `open_fds` int(11) DEFAULT NULL,
+  `listening_ports` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `folder_size_bytes` bigint(20) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 --
@@ -56,11 +53,12 @@ CREATE TABLE `gsp_machine_samples` (
 --
 
 --
--- Indexes for table `gsp_machine_samples`
+-- Indexes for table `process_samples`
 --
-ALTER TABLE `gsp_machine_samples`
+ALTER TABLE `process_samples`
   ADD PRIMARY KEY (`id`),
-  ADD KEY `idx_machine_ts` (`machine_id`,`ts`),
+  ADD KEY `idx_proc_server` (`machine_id`,`server_name`,`ts`),
+  ADD KEY `idx_proc_pid` (`machine_id`,`pid`,`ts`),
   ADD KEY `idx_ts` (`ts`);
 
 --
@@ -68,9 +66,9 @@ ALTER TABLE `gsp_machine_samples`
 --
 
 --
--- AUTO_INCREMENT for table `gsp_machine_samples`
+-- AUTO_INCREMENT for table `process_samples`
 --
-ALTER TABLE `gsp_machine_samples`
+ALTER TABLE `process_samples`
   MODIFY `id` bigint(20) NOT NULL AUTO_INCREMENT;
 COMMIT;
 
