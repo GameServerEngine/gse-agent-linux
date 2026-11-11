@@ -61,7 +61,7 @@ sudo ./install.sh --uninstall
 
 ## Configuration Prompts
 
-The installer calls `agent_conf.sh --guided`. The guided configuration asks for the agent key/shared secret, listen IP, listen port, Panel API URL, Panel event receiver URL, remote host ID (shown as Panel remote server ID in the installer), FTP management setting, FTP method, game-server autorestart setting, restart-time agent auto-update setting, update repository URL, update branch, and update source path.
+The installer calls `agent_conf.sh --guided`. The guided configuration asks for the agent key/shared secret, listen IP, listen port, Panel API URL, Panel event receiver URL, remote host ID, FTP management setting, FTP method, game-server autorestart setting, restart-time agent auto-update setting, update repository URL, update branch, and update source path.
 
 The agent key/shared secret must match the remote-server record in the GSE Panel.
 
