@@ -61,7 +61,7 @@ sudo ./install.sh --uninstall
 
 ## Configuration Prompts
 
-The installer calls `agent_conf.sh --guided`. The guided configuration asks for the agent key/shared secret, listen IP, listen port, Panel API URL, Panel event receiver URL, remote server ID, FTP management setting, FTP method, game-server autorestart setting, restart-time agent auto-update setting, update repository URL, update branch, and update source path.
+The installer calls `agent_conf.sh --guided`. The guided configuration asks for the agent key/shared secret, listen IP, listen port, Panel API URL, Panel event receiver URL, remote game server ID, FTP management setting, FTP method, game-server autorestart setting, restart-time agent auto-update setting, update repository URL, update branch, and update source path.
 
 The agent key/shared secret must match the remote-server record in the GSE Panel.
 
@@ -127,7 +127,7 @@ Agent startup does not run SteamCMD and does not require internet access. Non-St
 
 The `_game_content/runtime/server_content.pids` file is reserved for generated server-content hook processes. During stop/restart cleanup, hook watchdog PIDs are stopped before hook application PIDs. The main game server watchdog PID should not be stored in this file.
 
-Legacy `_alsoRun.pid` files are treated as compatibility input. Stop, restart, force-stop, and start preflight import matching helper PIDs into the server-content cleanup path before escalating to main server PID and port cleanup.
+Legacy `_alsoRun.pid` files are treated as compatibility input. Stop, restart, force-stop, and start preflight import matching helper PIDs into the server-content cleanup path before escalating to main game server PID and port cleanup.
 
 Every Start regenerates `<game_home>/serverStart.sh` and launches it directly in the named screen session. The watchdog writes `<game_home>/watchdog.pid`, keeps `game.pid`, `game.launch_ts`, and optional `bot.pid` in the game home, checks every 30 seconds, and exits without starting game or sidecar processes unless `status.running` is the only readable desired-state marker. A game exit within 120 seconds of launch is treated as a crash loop: the watchdog writes `status.stopped`, terminates managed game/bot process groups, records a concise screen-log event, and exits. Optional bot settings are read only from `<game_home>/bot.def`. Home PID cleanup processes `watchdog.pid` before `bot.pid` and `game.pid`, using the shared Linux hard-stop helper.
 
@@ -286,4 +286,4 @@ sudo rm -f /etc/systemd/system/agent_core.service
 sudo systemctl daemon-reload
 ```
 
-Only remove `/home/gameserver/GSP` after confirming it does not contain customer server data, logs, SteamCMD data, or local configuration that must be preserved.
+Only remove `/home/gameserver/GSP` after confirming it does not contain customer game server data, logs, SteamCMD data, or local configuration that must be preserved.
