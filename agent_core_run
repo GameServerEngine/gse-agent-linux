@@ -151,7 +151,7 @@ validate_config() {
 		log "ERROR: Missing ${AGENTDIR}/Cfg/Config.pm. Run ./agent_conf.sh --guided." >&2
 		exit 1
 	fi
-	if grep -Eq "CHANGE_ME_PANEL_AGENT_KEY|key[[:space:]]*=>[[:space:]]*''" "${AGENTDIR}/Cfg/Config.pm"; then
+	if grep -Eq "CHANGE_ME_PANEL_AGENT_KEY|^[[:space:]]*key[[:space:]]*=>[[:space:]]*''" "${AGENTDIR}/Cfg/Config.pm"; then
 		log "ERROR: ${AGENTDIR}/Cfg/Config.pm still has a placeholder agent key." >&2
 		exit 1
 	fi
