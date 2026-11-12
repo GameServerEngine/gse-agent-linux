@@ -84,3 +84,7 @@ Generated files:
 
 - GSE Panel: control plane that sends agent commands
 - GSE Agent-Windows: Windows/Cygwin execution engine
+
+## Requirements
+
+`requirements.json` lists the minimum operating system and the prerequisites for this component. The GameServer Engine website reads it, so change that file (not the website) when a requirement changes. `tests/validate_requirements.sh` checks it.

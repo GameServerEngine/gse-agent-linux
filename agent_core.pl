@@ -1310,7 +1310,7 @@ sub shell_single_quote
 
 sub create_screen_cmd_loop
 {
-	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file, $home_path, $game_workdir) = @_;
+	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file, $home_path, $game_workdir, $game_port) = @_;
 
 	$exec_cmd = replace_Env_Vars($screen_id, "", "", $exec_cmd);
 	$home_path = "." unless(defined($home_path) && $home_path ne "");
@@ -1322,6 +1322,13 @@ sub create_screen_cmd_loop
 	my $server_start_bashfile = "$home_path/serverStart.sh";
 	my $quoted_watchdog_path = shell_single_quote($server_start_bashfile);
 	my $autorestart_enabled = defined($skipLoop) && $skipLoop ? "0" : "1";
+	my $quoted_game_port = shell_single_quote(defined($game_port) && $game_port =~ /^[0-9]+$/ ? $game_port : "");
+	my $quoted_screen_id = shell_single_quote($screen_id);
+	# The command that starts this watchdog inside screen. The panel Start runs it, and so does
+	# startserver.sh, so a start by hand is the same start.
+	my $screen_start_command = sprintf('export WINEDEBUG="fixme-all" && export DISPLAY=:1 && screen -d -m -t "%1$s" -c ' . SCREENRC_FILE . ' -S %1$s %2$s',
+									   $screen_id, "bash " . $quoted_watchdog_path);
+	my $quoted_screen_start_command = shell_single_quote($screen_start_command);
 
 	if(-e $server_start_bashfile){
 		secure_path_without_decrypt('chattr-i', $server_start_bashfile);
@@ -1336,9 +1343,12 @@ sub create_screen_cmd_loop
 		"GAME_WORKDIR=$quoted_game_workdir",
 		"GAME_COMMAND=$quoted_exec_cmd",
 		"AUTORESTART_ENABLED=$autorestart_enabled",
+		"GAME_PORT=$quoted_game_port",
+		"SCREEN_ID=$quoted_screen_id",
+		"SCREEN_START_COMMAND=$quoted_screen_start_command",
 		'cd "$HOME_PATH" || exit 1',
 		'umask 077',
-		'echo "$$" > "$HOME_PATH/watchdog.pid"',
+		'[ "$1" = "start" ] || [ "$1" = "stop" ] || echo "$$" > "$HOME_PATH/watchdog.pid"',
 		'',
 		'log_event() {',
 		'    printf "%s %s\n" "$(date -Is 2>/dev/null || date)" "$*" >&2',
@@ -1362,6 +1372,30 @@ sub create_screen_cmd_loop
 		'        mv -f "$tmp" "$HOME_PATH/status.stopped"',
 		'    fi',
 		'    rm -f "$HOME_PATH/status.running"',
+		'}',
+		'',
+		'publish_running_state() {',
+		'    tmp="$HOME_PATH/status.running.$$.$(date +%s).tmp"',
+		'    if printf "%s,running\n" "$(date +%s)" > "$tmp"; then',
+		'        chmod 0644 "$tmp"',
+		'        mv -f "$tmp" "$HOME_PATH/status.running"',
+		'    fi',
+		'    rm -f "$HOME_PATH/status.stopped"',
+		'}',
+		'',
+		'# A game that is already up on its port (started by hand, or left by an earlier watchdog) is',
+		'# taken over, never launched a second time. Returns 0 when one is up. The pid is recorded when',
+		'# it can be seen.',
+		'adopt_running_game() {',
+		'    [ -n "$GAME_PORT" ] || return 1',
+		'    listeners="$(ss -H -lntup 2>/dev/null | grep -E "[:.]$GAME_PORT[[:space:]]")"',
+		'    [ -n "$listeners" ] || return 1',
+		'    owner="$(printf "%s\n" "$listeners" | grep -o "pid=[0-9]*" | head -1 | cut -d= -f2)"',
+		'    if [ -n "$owner" ]; then',
+		'        printf "%s\n" "$owner" > "$HOME_PATH/game.pid"',
+		'        echo 1 > "$HOME_PATH/game.launch_ts"',
+		'    fi',
+		'    return 0',
 		'}',
 		'',
 		'pid_alive() {',
@@ -1457,11 +1491,40 @@ sub create_screen_cmd_loop
 		'    log_event "launched bot pid=$bot_pid"',
 		'}',
 		'',
+		'# bash serverStart.sh stop  : record STOPPED, then stop the watchdog, bot and game (stopserver.sh).',
+		'# bash serverStart.sh start : record RUNNING, then start the watchdog (startserver.sh).',
+		'if [ "$1" = "stop" ] || [ "$1" = "start" ]; then',
+		'    exec 9>>"$HOME_PATH/status.lock"',
+		'    flock -w 30 9 || { log_event "busy: another start or stop is working on this server"; exit 1; }',
+		'    old_watchdog="$(read_number_file "$HOME_PATH/watchdog.pid")"',
+		'fi',
+		'if [ "$1" = "stop" ]; then',
+		'    publish_stopped_state',
+		'    [ -n "$old_watchdog" ] && [ "$old_watchdog" != "$$" ] && kill "$old_watchdog" >/dev/null 2>&1',
+		'    adopt_running_game',
+		'    cleanup_managed_processes',
+		'    screen -S "$SCREEN_ID" -X quit >/dev/null 2>&1',
+		'    rm -f "$HOME_PATH/watchdog.pid"',
+		'    log_event "stopped"',
+		'    exit 0',
+		'fi',
+		'if [ "$1" = "start" ]; then',
+		'    publish_running_state',
+		'    if pid_alive "$old_watchdog" && grep -q serverStart.sh "/proc/$old_watchdog/cmdline" 2>/dev/null; then',
+		'        log_event "already running (watchdog pid=$old_watchdog)"',
+		'        exit 0',
+		'    fi',
+		'    screen -S "$SCREEN_ID" -X quit >/dev/null 2>&1',
+		'    bash -c "$SCREEN_START_COMMAND" 9>&-',
+		'    log_event "started"',
+		'    exit 0',
+		'fi',
+		'',
 		'is_running_state || exit 0',
 		'',
 		'while is_running_state; do',
 		'    game_pid="$(read_number_file "$HOME_PATH/game.pid")"',
-		'    if ! pid_alive "$game_pid"; then',
+		'    if ! pid_alive "$game_pid" && ! adopt_running_game; then',
 		'        previous_launch="$(read_number_file "$HOME_PATH/game.launch_ts")"',
 		'        now="$(date +%s)"',
 		'        if [ -n "$previous_launch" ] && [ "$previous_launch" -gt 0 ] && [ $((now - previous_launch)) -lt 120 ]; then',
@@ -1505,11 +1568,17 @@ sub create_screen_cmd_loop
 	my $readOnlyOwnerCmd = "chmod -Rf og-r " . $quoted_watchdog_path;
 	sudo_exec_without_decrypt($readOnlyOwnerCmd);
 
-	my $screen_exec_script = "bash " . $quoted_watchdog_path;
+	# startserver.sh and stopserver.sh: for an admin on the host. Run them as the game's user (or root).
+	foreach my $action ("start", "stop")
+	{
+		my $admin_script = "$home_path/${action}server.sh";
+		next unless(open(my $ADMIN_SCRIPT, '>', $admin_script));
+		print $ADMIN_SCRIPT "#!/bin/bash\n# $action this game server, like the panel button. It updates the status files.\nbash \"\$(dirname \"\$0\")/serverStart.sh\" $action\n";
+		close($ADMIN_SCRIPT);
+		chmod 0750, $admin_script;
+	}
 
-	return
-	  sprintf('export WINEDEBUG="fixme-all" && export DISPLAY=:1 && screen -d -m -t "%1$s" -c ' . SCREENRC_FILE . ' -S %1$s %2$s',
-			  $screen_id, $screen_exec_script);
+	return $screen_start_command;
 
 }
 
@@ -1860,7 +1929,9 @@ sub is_pid_alive_without_decrypt
 {
 	my ($pid) = @_;
 	return 0 unless(defined($pid) && $pid =~ /^\d+$/ && $pid > 0);
-	return kill(0, $pid) ? 1 : 0;
+	return 1 if(kill(0, $pid));
+	# EPERM means the process exists but belongs to another user (a game running as gamehomeNNN).
+	return $!{EPERM} ? 1 : 0;
 }
 
 sub read_proc_text_without_decrypt
@@ -2058,6 +2129,13 @@ sub process_associated_with_home_without_decrypt
 	foreach my $link ("cwd", "exe")
 	{
 		my $target = readlink("/proc/$pid/$link");
+		if(!defined($target))
+		{
+			# A game that runs as its own Linux user (gamehomeNNN) hides cwd/exe from the agent user; ask sudo.
+			$target = `echo '$SUDOPASSWD'|sudo -kS -p "" readlink /proc/$pid/$link 2>/dev/null`;
+			chomp($target) if(defined($target));
+			$target = undef if(defined($target) && $target eq "");
+		}
 		return 1 if(defined($target) && path_is_under_without_decrypt($target, $abs_home));
 	}
 	my $cmdline = proc_cmdline_without_decrypt($pid);
@@ -2131,14 +2209,17 @@ sub kill_pid_with_escalation_without_decrypt
 {
 	my ($pid, $as_user) = @_;
 	return 0 unless(defined($pid) && $pid =~ /^\d+$/);
-	my $cnt = sudo_exec_without_decrypt("kill 15 $pid", $as_user);
-	($cnt) = split(/;/, $cnt, 2);
-	if ($cnt == -1)
+	# Always signal as root: the game may run as another Linux user, or have no screen session left to ask.
+	# Ask nicely first (TERM), then force (KILL) if it is still alive.
+	sudo_exec_without_decrypt("kill -15 $pid");
+	for(my $i = 0; $i < 10; $i++)
 	{
-		$cnt = sudo_exec_without_decrypt("kill 9 $pid", $as_user);
-		($cnt) = split(/;/, $cnt, 2);
+		return 1 unless(is_pid_alive_without_decrypt($pid));
+		select(undef, undef, undef, 0.5);
 	}
-	return $cnt == -1 ? 0 : 1;
+	sudo_exec_without_decrypt("kill -9 $pid");
+	sleep 1;
+	return is_pid_alive_without_decrypt($pid) ? 0 : 1;
 }
 
 sub find_process_pids_by_port_without_decrypt
@@ -2159,7 +2240,9 @@ sub find_process_pids_by_port_without_decrypt
 		push(@commands, "ss -lnup '( sport = :$port )' 2>/dev/null");
 	}
 	my %pids = ();
-	foreach my $command (@commands)
+	# Games run as their own Linux user, so as the agent user lsof/ss cannot see their PIDs. Ask sudo too.
+	my @with_sudo = map { "echo '$SUDOPASSWD'|sudo -kS -p \"\" $_" } @commands;
+	foreach my $command (@commands, @with_sudo)
 	{
 		my $out = `$command`;
 		next unless(defined($out) && $out ne "");
@@ -2321,11 +2404,53 @@ sub lifecycle_stop_evidence_without_decrypt
 	return {
 		session_running => $session_running,
 		process_running => @remaining_pids ? 1 : 0,
-		port_listening => @port_pids ? 1 : 0,
+		port_listening => (@port_pids || is_port_listening_without_decrypt($server_ip, $server_port, "any")) ? 1 : 0,
 		remaining_pids => \@remaining_pids,
 		port_pids => \@port_pids,
 		tracked_pids => \@tracked_pids
 	};
+}
+
+# Called from the per-second scheduler task, runs at most every 30 seconds: a home that is wanted RUNNING but has no live watchdog gets one again.
+# serverStart.sh start is the same as startserver.sh: the watchdog takes over a game that is still up on its
+# port, or launches it. A home wanted STOPPED is never touched. At most one revive per home per minute.
+my %reconcile_last_revive;
+my $reconcile_last_run = 0;
+sub reconcile_running_homes
+{
+	return if(time() - $reconcile_last_run < 30);
+	$reconcile_last_run = time();
+	return unless(opendir(my $FLAGS, GAME_STARTUP_DIR));
+	my @flags = grep { !/^\./ && !/^(?:status|pid)-/ } readdir($FLAGS);
+	closedir($FLAGS);
+	foreach my $flag (@flags)
+	{
+		next unless(open(my $FH, '<', Path::Class::File->new(GAME_STARTUP_DIR, $flag)));
+		my $line = <$FH>;
+		close($FH);
+		next unless(defined($line));
+		my ($home_id, $home_path) = split(',', $line, 3);
+		next unless(defined($home_path) && $home_id =~ /^\d+$/ && -d $home_path);
+		my ($desired_state) = read_desired_state_without_decrypt($home_path);
+		next unless($desired_state eq "running");
+		next unless(-r "$home_path/serverStart.sh");
+		my $watchdog_pid = "";
+		if(open(my $PIDFILE, '<', "$home_path/watchdog.pid"))
+		{
+			$watchdog_pid = <$PIDFILE>;
+			close($PIDFILE);
+			$watchdog_pid = "" unless(defined($watchdog_pid) && $watchdog_pid =~ /^\s*(\d+)\s*$/);
+			$watchdog_pid = $1 if($watchdog_pid ne "");
+		}
+		next if($watchdog_pid ne "" && is_pid_alive_without_decrypt($watchdog_pid) && index(proc_cmdline_without_decrypt($watchdog_pid), "serverStart.sh") >= 0);
+		my $now = time();
+		next if(defined($reconcile_last_revive{$home_id}) && $now - $reconcile_last_revive{$home_id} < 60);
+		$reconcile_last_revive{$home_id} = $now;
+		my $owner = SERVER_RUNNER_USER;
+		$owner = "gamehome" . $home_id if(defined LINUX_USER_PER_GAME_SERVER && LINUX_USER_PER_GAME_SERVER eq "1");
+		logger "HOME ID:$home_id is wanted RUNNING but its watchdog is not running; starting the watchdog again.";
+		sudo_exec_without_decrypt("bash '$home_path/serverStart.sh' start", $owner);
+	}
 }
 
 sub safe_port_owner_status_without_decrypt
@@ -2454,6 +2579,7 @@ sub hard_stop_server_without_decrypt
 	push(@{$result{failures}}, "screen still active") if($evidence->{session_running});
 	push(@{$result{failures}}, "tracked PIDs still active: " . join(',', @{$evidence->{remaining_pids}})) if(@{$evidence->{remaining_pids}});
 	push(@{$result{failures}}, "port owners still active: " . join(',', @{$evidence->{port_pids}})) if(@{$evidence->{port_pids}});
+	push(@{$result{failures}}, "port $server_port is still listening") if($evidence->{port_listening} && !@{$evidence->{port_pids}});
 	$result{message} = join(' ', @{$result{failures}});
 	return \%result;
 }
@@ -2858,9 +2984,9 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir, $server_port);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir, $server_port);
 		}
 	}
 	elsif($file_extension eq ".jar")
@@ -2873,9 +2999,9 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir, $server_port);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir, $server_port);
 		}
 	}
 	else
@@ -2888,9 +3014,9 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir, $server_port);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir, $server_port);
 		}
 	}
 
@@ -4773,39 +4899,15 @@ sub discover_ips
 		return "";
 	}
 
-	my $iplist = "";
-	my $ipfound;
-	my $junk;
-
-	my @ipraw = `/sbin/ifconfig`;
-	while (<@ipraw>)
+	# Every IPv4 address of this machine except loopback ("ip" works on every supported
+	# system; the old ifconfig parsing found nothing on current Ubuntu and Debian).
+	my @ips;
+	foreach my $line (`ip -o -4 addr show 2>/dev/null`)
 	{
-		chomp;
-		next if $_ !~ /^inet:/ ;
-		logger "Found addr on line: $_";
-		($junk, $ipfound) = split(":", $_);
-		next if $ipfound eq '';
-		next if $ipfound eq '127.0.0.1';
-
-		logger "Found an IP $ipfound";
-		$iplist .= "$ipfound,";
-		logger "IPlist is now $iplist";
+		push @ips, $1 if ($line =~ /\sinet\s+(\d+\.\d+\.\d+\.\d+)\// && $1 !~ /^127\./);
 	}
-	while (<@ipraw>)
-	{
-		chomp;
-		next if $_ !~ /^addr:/ ;
-		logger "Found addr on line: $_";
-		($junk, $ipfound) = split(":", $_);
-		next if $ipfound eq '';
-		next if $ipfound eq '127.0.0.1';
-
-		logger "Found an IP $ipfound";
-		$iplist .= "$ipfound,";
-		logger "IPlist is now $iplist";
-	}
-	chop $iplist;
-	return "$iplist";
+	logger "Found IPs: @ips";
+	return join(",", @ips);
 }
 
 ### Return -1 In case of invalid param
@@ -7188,6 +7290,8 @@ sub scheduler_edit_task
 
 sub scheduler_read_tasks
 {
+	# The scheduler rebuilds its timetable every second, which starves seconds-based jobs, so ride this one.
+	eval { reconcile_running_homes(); 1 } or logger "reconcile_running_homes failed: $@";
 	if( open(TASKS, '<', SCHED_TASKS) )
 	{
 		# Store built-in scheduler tasks before cleaning timetable

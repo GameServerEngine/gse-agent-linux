@@ -151,7 +151,7 @@ validate_config() {
 		log "ERROR: Missing ${AGENTDIR}/Cfg/Config.pm. Run ./agent_conf.sh --guided." >&2
 		exit 1
 	fi
-	if grep -Eq "CHANGE_ME_PANEL_AGENT_KEY|key[[:space:]]*=>[[:space:]]*''" "${AGENTDIR}/Cfg/Config.pm"; then
+	if grep -Eq "CHANGE_ME_PANEL_AGENT_KEY|^[[:space:]]*key[[:space:]]*=>[[:space:]]*''" "${AGENTDIR}/Cfg/Config.pm"; then
 		log "ERROR: ${AGENTDIR}/Cfg/Config.pm still has a placeholder agent key." >&2
 		exit 1
 	fi
@@ -528,13 +528,24 @@ if [ ! -x "$AGENT" ]; then
 fi
 
 echo "$$" > "$PID_FILE"
-trap cleanup_pid EXIT INT TERM
+agent_pid=""
+# On stop, pass TERM to the agent and leave. (This trap used to only remove the pid file, so the loop
+# below restarted the agent and systemd waited for TimeoutStopSec before killing it.)
+stop_now() {
+	[ -n "$agent_pid" ] && kill -TERM "$agent_pid" 2>/dev/null
+	exit 0
+}
+trap cleanup_pid EXIT
+trap stop_now INT TERM
 
 cd "$AGENTDIR"
 auto_update_on_restart
 
 while true; do
-	perl "$AGENT" "${agent_args[@]}" || rc=$?
+	perl "$AGENT" "${agent_args[@]}" &
+	agent_pid=$!
+	wait "$agent_pid" || rc=$?
+	agent_pid=""
 	rc="${rc:-0}"
 	if [ "$rc" -eq 0 ]; then
 		log "$(date): GSE Agent stopped cleanly"

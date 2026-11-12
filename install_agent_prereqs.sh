@@ -66,7 +66,7 @@ done
 
 echo
 echo "32-bit compatibility packages are useful for some legacy SteamCMD/game-server binaries."
-read -r -p "Enable i386 architecture and install 32-bit compatibility packages? [yes]: " install_i386
+read -r -p "Enable i386 architecture and install 32-bit compatibility packages? [yes]: " install_i386 || install_i386=yes
 install_i386="${install_i386:-yes}"
 if [[ "$install_i386" =~ ^[Yy]([Ee][Ss])?$ ]]; then
 	if ! dpkg --print-foreign-architectures | grep -qx i386; then

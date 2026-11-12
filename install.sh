@@ -215,8 +215,13 @@ clone_repo_with_retry() {
 	while true; do
 		rm -rf "$dest"
 		log "Cloning ${REPO_URL} branch ${REPO_BRANCH}..."
-		if git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$dest"; then
+		# safe.directory: root refuses to clone a local source owned by another user ("dubious ownership").
+		if git -c safe.directory='*' clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$dest"; then
 			return 0
+		fi
+		# With no one to answer the prompt, stop after 3 tries instead of retrying forever.
+		if [ "$NON_INTERACTIVE" -eq 1 ] && [ "$attempt" -ge 3 ]; then
+			fail "Clone failed ${attempt} times; giving up."
 		fi
 		if ! ask_yes_no "Clone failed on attempt ${attempt}. Retry?" "yes"; then
 			fail "Cannot continue without a successful clone."

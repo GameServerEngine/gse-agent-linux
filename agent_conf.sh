@@ -171,6 +171,10 @@ if [ "$guided" -eq 1 ]; then
 fi
 
 [ -n "$key" ] || key="CHANGE_ME_PANEL_AGENT_KEY"
+if [ "${#key}" -gt 16 ]; then
+	echo "ERROR: the agent key can be at most 16 characters (the Panel and the agent cannot use a longer key)." >&2
+	exit 1
+fi
 [[ "$listen_port" =~ ^[0-9]+$ ]] || {
 	echo "ERROR: listen port must be numeric." >&2
 	exit 1
