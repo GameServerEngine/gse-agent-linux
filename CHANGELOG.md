@@ -3,6 +3,8 @@
 Each fixed issue gets an entry under the version that shipped it: a one-line title, then the cause and the fix in plain language, written so a customer can follow it.
 
 ## 0.5.1
+- **One-file installer:** `gse-agent-linux-install.sh` (attached to every release) asks for the panel address, the agent key from the panel's Servers page and the agent user's password; gets the server's settings and the release from the panel; installs the prerequisites, creates the user, writes the configuration, sets up Pure-FTPd, installs and starts the systemd service and tells the panel the agent is ready. Tested on Ubuntu 24.04 and Debian 12 against a test panel.
+- **The panel finds the agent's IP addresses:** the IP list came from parsing `/sbin/ifconfig`, which current Ubuntu and Debian do not install, so a new server got no IPs. It now reads `ip -o -4 addr show`.
 - **Agent stops at once:** `systemctl stop` and `restart` took 60 seconds because the start script ignored the stop signal and restarted the agent. It now passes the signal on and exits.
 - **Installer:** a failed clone in non-interactive mode stops after 3 tries instead of retrying forever, and root can clone a source folder owned by another user. The prerequisite installer no longer exits at the i386 question when it has no keyboard (it takes the default, yes).
 - **Requirements:** minimum is Ubuntu 22.04 or Debian 12 (tested in containers: the prerequisites install and the agent compiles).

@@ -4899,39 +4899,15 @@ sub discover_ips
 		return "";
 	}
 
-	my $iplist = "";
-	my $ipfound;
-	my $junk;
-
-	my @ipraw = `/sbin/ifconfig`;
-	while (<@ipraw>)
+	# Every IPv4 address of this machine except loopback ("ip" works on every supported
+	# system; the old ifconfig parsing found nothing on current Ubuntu and Debian).
+	my @ips;
+	foreach my $line (`ip -o -4 addr show 2>/dev/null`)
 	{
-		chomp;
-		next if $_ !~ /^inet:/ ;
-		logger "Found addr on line: $_";
-		($junk, $ipfound) = split(":", $_);
-		next if $ipfound eq '';
-		next if $ipfound eq '127.0.0.1';
-
-		logger "Found an IP $ipfound";
-		$iplist .= "$ipfound,";
-		logger "IPlist is now $iplist";
+		push @ips, $1 if ($line =~ /\sinet\s+(\d+\.\d+\.\d+\.\d+)\// && $1 !~ /^127\./);
 	}
-	while (<@ipraw>)
-	{
-		chomp;
-		next if $_ !~ /^addr:/ ;
-		logger "Found addr on line: $_";
-		($junk, $ipfound) = split(":", $_);
-		next if $ipfound eq '';
-		next if $ipfound eq '127.0.0.1';
-
-		logger "Found an IP $ipfound";
-		$iplist .= "$ipfound,";
-		logger "IPlist is now $iplist";
-	}
-	chop $iplist;
-	return "$iplist";
+	logger "Found IPs: @ips";
+	return join(",", @ips);
 }
 
 ### Return -1 In case of invalid param
