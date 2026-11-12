@@ -79,6 +79,13 @@ in `management_home` through `write_desired_state_without_decrypt`. Legacy
 removed during verified cleanup; active Start, Stop, Force Stop, Restart, and
 status classification no longer use them as lifecycle control state.
 
+## Start and Stop on the Host
+
+An admin on the host uses `startserver.sh` and `stopserver.sh` in the game folder. They run
+`serverStart.sh start` or `stop`, which take `status.lock`, write the desired-state marker, and
+start or stop the watchdog, bot and game exactly like the Panel buttons. Do not kill the game by
+hand while `status.running` is present: the watchdog restarts it. Use `stopserver.sh`.
+
 ## Actual State
 
 Actual runtime state must be proven from live evidence:

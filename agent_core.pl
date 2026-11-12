@@ -61,7 +61,7 @@ use constant AGENT_KEY	  => $Cfg::Config{key};
 use constant AGENT_IP	   => $Cfg::Config{listen_ip};
 use constant AGENT_LOG_FILE => $Cfg::Config{logfile};
 use constant AGENT_PORT	 => $Cfg::Config{listen_port};
-use constant AGENT_CODE_VERSION => 'gsp-linux-agent-0.5.0';
+use constant AGENT_CODE_VERSION => 'gsp-linux-agent-0.5.1';
 use constant AGENT_VERSION  => AGENT_CODE_VERSION;
 use constant WEB_ADMIN_API_KEY  => $Cfg::Config{web_admin_api_key};
 use constant WEB_API_URL => $Cfg::Config{web_api_url};
@@ -1310,7 +1310,7 @@ sub shell_single_quote
 
 sub create_screen_cmd_loop
 {
-	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file, $home_path, $game_workdir) = @_;
+	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file, $home_path, $game_workdir, $game_port) = @_;
 
 	$exec_cmd = replace_Env_Vars($screen_id, "", "", $exec_cmd);
 	$home_path = "." unless(defined($home_path) && $home_path ne "");
@@ -1322,6 +1322,13 @@ sub create_screen_cmd_loop
 	my $server_start_bashfile = "$home_path/serverStart.sh";
 	my $quoted_watchdog_path = shell_single_quote($server_start_bashfile);
 	my $autorestart_enabled = defined($skipLoop) && $skipLoop ? "0" : "1";
+	my $quoted_game_port = shell_single_quote(defined($game_port) && $game_port =~ /^[0-9]+$/ ? $game_port : "");
+	my $quoted_screen_id = shell_single_quote($screen_id);
+	# The command that starts this watchdog inside screen. The panel Start runs it, and so does
+	# startserver.sh, so a start by hand is the same start.
+	my $screen_start_command = sprintf('export WINEDEBUG="fixme-all" && export DISPLAY=:1 && screen -d -m -t "%1$s" -c ' . SCREENRC_FILE . ' -S %1$s %2$s',
+									   $screen_id, "bash " . $quoted_watchdog_path);
+	my $quoted_screen_start_command = shell_single_quote($screen_start_command);
 
 	if(-e $server_start_bashfile){
 		secure_path_without_decrypt('chattr-i', $server_start_bashfile);
@@ -1336,9 +1343,12 @@ sub create_screen_cmd_loop
 		"GAME_WORKDIR=$quoted_game_workdir",
 		"GAME_COMMAND=$quoted_exec_cmd",
 		"AUTORESTART_ENABLED=$autorestart_enabled",
+		"GAME_PORT=$quoted_game_port",
+		"SCREEN_ID=$quoted_screen_id",
+		"SCREEN_START_COMMAND=$quoted_screen_start_command",
 		'cd "$HOME_PATH" || exit 1',
 		'umask 077',
-		'echo "$$" > "$HOME_PATH/watchdog.pid"',
+		'[ "$1" = "start" ] || [ "$1" = "stop" ] || echo "$$" > "$HOME_PATH/watchdog.pid"',
 		'',
 		'log_event() {',
 		'    printf "%s %s\n" "$(date -Is 2>/dev/null || date)" "$*" >&2',
@@ -1362,6 +1372,30 @@ sub create_screen_cmd_loop
 		'        mv -f "$tmp" "$HOME_PATH/status.stopped"',
 		'    fi',
 		'    rm -f "$HOME_PATH/status.running"',
+		'}',
+		'',
+		'publish_running_state() {',
+		'    tmp="$HOME_PATH/status.running.$$.$(date +%s).tmp"',
+		'    if printf "%s,running\n" "$(date +%s)" > "$tmp"; then',
+		'        chmod 0644 "$tmp"',
+		'        mv -f "$tmp" "$HOME_PATH/status.running"',
+		'    fi',
+		'    rm -f "$HOME_PATH/status.stopped"',
+		'}',
+		'',
+		'# A game that is already up on its port (started by hand, or left by an earlier watchdog) is',
+		'# taken over, never launched a second time. Returns 0 when one is up. The pid is recorded when',
+		'# it can be seen.',
+		'adopt_running_game() {',
+		'    [ -n "$GAME_PORT" ] || return 1',
+		'    listeners="$(ss -H -lntup 2>/dev/null | grep -E "[:.]$GAME_PORT[[:space:]]")"',
+		'    [ -n "$listeners" ] || return 1',
+		'    owner="$(printf "%s\n" "$listeners" | grep -o "pid=[0-9]*" | head -1 | cut -d= -f2)"',
+		'    if [ -n "$owner" ]; then',
+		'        printf "%s\n" "$owner" > "$HOME_PATH/game.pid"',
+		'        echo 1 > "$HOME_PATH/game.launch_ts"',
+		'    fi',
+		'    return 0',
 		'}',
 		'',
 		'pid_alive() {',
@@ -1457,11 +1491,40 @@ sub create_screen_cmd_loop
 		'    log_event "launched bot pid=$bot_pid"',
 		'}',
 		'',
+		'# bash serverStart.sh stop  : record STOPPED, then stop the watchdog, bot and game (stopserver.sh).',
+		'# bash serverStart.sh start : record RUNNING, then start the watchdog (startserver.sh).',
+		'if [ "$1" = "stop" ] || [ "$1" = "start" ]; then',
+		'    exec 9>>"$HOME_PATH/status.lock"',
+		'    flock -w 30 9 || { log_event "busy: another start or stop is working on this server"; exit 1; }',
+		'    old_watchdog="$(read_number_file "$HOME_PATH/watchdog.pid")"',
+		'fi',
+		'if [ "$1" = "stop" ]; then',
+		'    publish_stopped_state',
+		'    [ -n "$old_watchdog" ] && [ "$old_watchdog" != "$$" ] && kill "$old_watchdog" >/dev/null 2>&1',
+		'    adopt_running_game',
+		'    cleanup_managed_processes',
+		'    screen -S "$SCREEN_ID" -X quit >/dev/null 2>&1',
+		'    rm -f "$HOME_PATH/watchdog.pid"',
+		'    log_event "stopped"',
+		'    exit 0',
+		'fi',
+		'if [ "$1" = "start" ]; then',
+		'    publish_running_state',
+		'    if pid_alive "$old_watchdog" && grep -q serverStart.sh "/proc/$old_watchdog/cmdline" 2>/dev/null; then',
+		'        log_event "already running (watchdog pid=$old_watchdog)"',
+		'        exit 0',
+		'    fi',
+		'    screen -S "$SCREEN_ID" -X quit >/dev/null 2>&1',
+		'    bash -c "$SCREEN_START_COMMAND" 9>&-',
+		'    log_event "started"',
+		'    exit 0',
+		'fi',
+		'',
 		'is_running_state || exit 0',
 		'',
 		'while is_running_state; do',
 		'    game_pid="$(read_number_file "$HOME_PATH/game.pid")"',
-		'    if ! pid_alive "$game_pid"; then',
+		'    if ! pid_alive "$game_pid" && ! adopt_running_game; then',
 		'        previous_launch="$(read_number_file "$HOME_PATH/game.launch_ts")"',
 		'        now="$(date +%s)"',
 		'        if [ -n "$previous_launch" ] && [ "$previous_launch" -gt 0 ] && [ $((now - previous_launch)) -lt 120 ]; then',
@@ -1505,11 +1568,17 @@ sub create_screen_cmd_loop
 	my $readOnlyOwnerCmd = "chmod -Rf og-r " . $quoted_watchdog_path;
 	sudo_exec_without_decrypt($readOnlyOwnerCmd);
 
-	my $screen_exec_script = "bash " . $quoted_watchdog_path;
+	# startserver.sh and stopserver.sh: for an admin on the host. Run them as the game's user (or root).
+	foreach my $action ("start", "stop")
+	{
+		my $admin_script = "$home_path/${action}server.sh";
+		next unless(open(my $ADMIN_SCRIPT, '>', $admin_script));
+		print $ADMIN_SCRIPT "#!/bin/bash\n# $action this game server, like the panel button. It updates the status files.\nbash \"\$(dirname \"\$0\")/serverStart.sh\" $action\n";
+		close($ADMIN_SCRIPT);
+		chmod 0750, $admin_script;
+	}
 
-	return
-	  sprintf('export WINEDEBUG="fixme-all" && export DISPLAY=:1 && screen -d -m -t "%1$s" -c ' . SCREENRC_FILE . ' -S %1$s %2$s',
-			  $screen_id, $screen_exec_script);
+	return $screen_start_command;
 
 }
 
@@ -2858,9 +2927,9 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir, $server_port);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir, $server_port);
 		}
 	}
 	elsif($file_extension eq ".jar")
@@ -2873,9 +2942,9 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir, $server_port);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir, $server_port);
 		}
 	}
 	else
@@ -2888,9 +2957,9 @@ sub universal_start_without_decrypt
 		}
 
 		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir, $server_port);
 		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir);
+			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir, $server_port);
 		}
 	}
 

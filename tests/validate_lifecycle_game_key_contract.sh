@@ -388,7 +388,7 @@ require_text 'my ($payload_path_ok, $game_binary_dir, $payload_path_error) = res
 require_text 'my ($desired_state, $desired_state_reason) = read_desired_state_without_decrypt($home_path);'
 require_text 'Skipping automatic startup for HOME ID:$home_id because desired state is $desired_state ($desired_state_reason).'
 require_text 'prepare_server_content_runtime_without_decrypt($home_path);'
-require_text 'create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir);'
+require_text 'create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir, $server_port);'
 require_text 'backup_home_log( $home_id, $log_file, $game_root . "/" . $console_log );'
 require_text '$startup_cmd = replace_Env_Vars($screen_id, $home_id, $game_root, $startup_cmd, $game_key);'
 require_text '$line = replace_Env_Vars("", $home_id, $game_root, $line, $game_key);'
