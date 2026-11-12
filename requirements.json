@@ -4,14 +4,28 @@
  "title": "GSE Linux Agent",
  "minimum_os": [
   {
-   "name": "Debian / Ubuntu family (apt, dpkg, systemd)",
-   "minimum": null
+   "name": "Ubuntu 22.04 LTS or newer",
+   "minimum": "22.04",
+   "note": "Needs apt, dpkg, systemd and Perl 5.34 or newer."
+  },
+  {
+   "name": "Debian 12 or newer",
+   "minimum": "12",
+   "note": "Debian 11 is end of life and its package mirrors no longer work."
   }
  ],
  "tested_on": [
   {
    "name": "Ubuntu 24.04 LTS",
-   "note": "Agent start-up, Panel Start and Stop, startserver.sh and stopserver.sh, orphaned-game clean-up (2026-11-12). Debian is untested."
+   "note": "Full test with a game: agent start-up, Panel Start and Stop, startserver.sh and stopserver.sh, orphaned-game clean-up, watchdog revive (2026-11-12)."
+  },
+  {
+   "name": "Ubuntu 22.04 LTS",
+   "note": "Container test only: install_agent_prereqs.sh installs everything and agent_core.pl compiles (2026-11-12). Not run with a game."
+  },
+  {
+   "name": "Debian 12",
+   "note": "Container test only: prerequisites install and agent_core.pl compiles (2026-11-12). Not run with a game."
   }
  ],
  "prerequisites": [
@@ -37,6 +51,7 @@
   }
  ],
  "unverified": [
-  "The exact minimum Debian and Ubuntu release is not yet set or tested."
+  "Ubuntu 22.04 and Debian 12 were only tested in containers, not with a running game.",
+  "Debian 11 and Ubuntu 20.04 are not supported."
  ]
 }
