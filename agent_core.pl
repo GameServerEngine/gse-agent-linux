@@ -1929,7 +1929,9 @@ sub is_pid_alive_without_decrypt
 {
 	my ($pid) = @_;
 	return 0 unless(defined($pid) && $pid =~ /^\d+$/ && $pid > 0);
-	return kill(0, $pid) ? 1 : 0;
+	return 1 if(kill(0, $pid));
+	# EPERM means the process exists but belongs to another user (a game running as gamehomeNNN).
+	return $!{EPERM} ? 1 : 0;
 }
 
 sub read_proc_text_without_decrypt
@@ -2127,6 +2129,13 @@ sub process_associated_with_home_without_decrypt
 	foreach my $link ("cwd", "exe")
 	{
 		my $target = readlink("/proc/$pid/$link");
+		if(!defined($target))
+		{
+			# A game that runs as its own Linux user (gamehomeNNN) hides cwd/exe from the agent user; ask sudo.
+			$target = `echo '$SUDOPASSWD'|sudo -kS -p "" readlink /proc/$pid/$link 2>/dev/null`;
+			chomp($target) if(defined($target));
+			$target = undef if(defined($target) && $target eq "");
+		}
 		return 1 if(defined($target) && path_is_under_without_decrypt($target, $abs_home));
 	}
 	my $cmdline = proc_cmdline_without_decrypt($pid);
@@ -2200,14 +2209,17 @@ sub kill_pid_with_escalation_without_decrypt
 {
 	my ($pid, $as_user) = @_;
 	return 0 unless(defined($pid) && $pid =~ /^\d+$/);
-	my $cnt = sudo_exec_without_decrypt("kill 15 $pid", $as_user);
-	($cnt) = split(/;/, $cnt, 2);
-	if ($cnt == -1)
+	# Always signal as root: the game may run as another Linux user, or have no screen session left to ask.
+	# Ask nicely first (TERM), then force (KILL) if it is still alive.
+	sudo_exec_without_decrypt("kill -15 $pid");
+	for(my $i = 0; $i < 10; $i++)
 	{
-		$cnt = sudo_exec_without_decrypt("kill 9 $pid", $as_user);
-		($cnt) = split(/;/, $cnt, 2);
+		return 1 unless(is_pid_alive_without_decrypt($pid));
+		select(undef, undef, undef, 0.5);
 	}
-	return $cnt == -1 ? 0 : 1;
+	sudo_exec_without_decrypt("kill -9 $pid");
+	sleep 1;
+	return is_pid_alive_without_decrypt($pid) ? 0 : 1;
 }
 
 sub find_process_pids_by_port_without_decrypt
@@ -2228,7 +2240,9 @@ sub find_process_pids_by_port_without_decrypt
 		push(@commands, "ss -lnup '( sport = :$port )' 2>/dev/null");
 	}
 	my %pids = ();
-	foreach my $command (@commands)
+	# Games run as their own Linux user, so as the agent user lsof/ss cannot see their PIDs. Ask sudo too.
+	my @with_sudo = map { "echo '$SUDOPASSWD'|sudo -kS -p \"\" $_" } @commands;
+	foreach my $command (@commands, @with_sudo)
 	{
 		my $out = `$command`;
 		next unless(defined($out) && $out ne "");
@@ -2390,11 +2404,53 @@ sub lifecycle_stop_evidence_without_decrypt
 	return {
 		session_running => $session_running,
 		process_running => @remaining_pids ? 1 : 0,
-		port_listening => @port_pids ? 1 : 0,
+		port_listening => (@port_pids || is_port_listening_without_decrypt($server_ip, $server_port, "any")) ? 1 : 0,
 		remaining_pids => \@remaining_pids,
 		port_pids => \@port_pids,
 		tracked_pids => \@tracked_pids
 	};
+}
+
+# Called from the per-second scheduler task, runs at most every 30 seconds: a home that is wanted RUNNING but has no live watchdog gets one again.
+# serverStart.sh start is the same as startserver.sh: the watchdog takes over a game that is still up on its
+# port, or launches it. A home wanted STOPPED is never touched. At most one revive per home per minute.
+my %reconcile_last_revive;
+my $reconcile_last_run = 0;
+sub reconcile_running_homes
+{
+	return if(time() - $reconcile_last_run < 30);
+	$reconcile_last_run = time();
+	return unless(opendir(my $FLAGS, GAME_STARTUP_DIR));
+	my @flags = grep { !/^\./ && !/^(?:status|pid)-/ } readdir($FLAGS);
+	closedir($FLAGS);
+	foreach my $flag (@flags)
+	{
+		next unless(open(my $FH, '<', Path::Class::File->new(GAME_STARTUP_DIR, $flag)));
+		my $line = <$FH>;
+		close($FH);
+		next unless(defined($line));
+		my ($home_id, $home_path) = split(',', $line, 3);
+		next unless(defined($home_path) && $home_id =~ /^\d+$/ && -d $home_path);
+		my ($desired_state) = read_desired_state_without_decrypt($home_path);
+		next unless($desired_state eq "running");
+		next unless(-r "$home_path/serverStart.sh");
+		my $watchdog_pid = "";
+		if(open(my $PIDFILE, '<', "$home_path/watchdog.pid"))
+		{
+			$watchdog_pid = <$PIDFILE>;
+			close($PIDFILE);
+			$watchdog_pid = "" unless(defined($watchdog_pid) && $watchdog_pid =~ /^\s*(\d+)\s*$/);
+			$watchdog_pid = $1 if($watchdog_pid ne "");
+		}
+		next if($watchdog_pid ne "" && is_pid_alive_without_decrypt($watchdog_pid) && index(proc_cmdline_without_decrypt($watchdog_pid), "serverStart.sh") >= 0);
+		my $now = time();
+		next if(defined($reconcile_last_revive{$home_id}) && $now - $reconcile_last_revive{$home_id} < 60);
+		$reconcile_last_revive{$home_id} = $now;
+		my $owner = SERVER_RUNNER_USER;
+		$owner = "gamehome" . $home_id if(defined LINUX_USER_PER_GAME_SERVER && LINUX_USER_PER_GAME_SERVER eq "1");
+		logger "HOME ID:$home_id is wanted RUNNING but its watchdog is not running; starting the watchdog again.";
+		sudo_exec_without_decrypt("bash '$home_path/serverStart.sh' start", $owner);
+	}
 }
 
 sub safe_port_owner_status_without_decrypt
@@ -2523,6 +2579,7 @@ sub hard_stop_server_without_decrypt
 	push(@{$result{failures}}, "screen still active") if($evidence->{session_running});
 	push(@{$result{failures}}, "tracked PIDs still active: " . join(',', @{$evidence->{remaining_pids}})) if(@{$evidence->{remaining_pids}});
 	push(@{$result{failures}}, "port owners still active: " . join(',', @{$evidence->{port_pids}})) if(@{$evidence->{port_pids}});
+	push(@{$result{failures}}, "port $server_port is still listening") if($evidence->{port_listening} && !@{$evidence->{port_pids}});
 	$result{message} = join(' ', @{$result{failures}});
 	return \%result;
 }
@@ -7257,6 +7314,8 @@ sub scheduler_edit_task
 
 sub scheduler_read_tasks
 {
+	# The scheduler rebuilds its timetable every second, which starves seconds-based jobs, so ride this one.
+	eval { reconcile_running_homes(); 1 } or logger "reconcile_running_homes failed: $@";
 	if( open(TASKS, '<', SCHED_TASKS) )
 	{
 		# Store built-in scheduler tasks before cleaning timetable
