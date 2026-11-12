@@ -6680,12 +6680,115 @@ sub agent_update_status
 	return component_update_response(%data);
 }
 
+
+sub agent_update_shell_quote
+{
+	my ($value) = @_;
+	$value = '' unless defined $value;
+	$value =~ s/'/'\\''/g;
+	return "'$value'";
+}
+
+sub write_agent_update_state
+{
+	my (%state) = @_;
+	my $state_file = AGENT_UPDATE_STATE_FILE . '';
+	my $tmp = $state_file . ".tmp.$$";
+	open(my $fh, '>', $tmp) or return 0;
+	print $fh encode_json(\%state) . "\n";
+	close($fh);
+	return rename($tmp, $state_file) ? 1 : 0;
+}
+
+# Downloads a release zip, verifies its SHA-256, then starts the on-demand
+# update helper detached. The helper stops this agent, swaps the files,
+# starts the agent again, and restores the backup if it does not come back.
+# Mirrors the Windows agent's archive-based update; see agent_update_helper.sh.
+sub start_agent_update
+{
+	my (%cfg) = @_;
+	my $component = $cfg{component} || 'linux_agent';
+	my $archive_url = $cfg{archive_url} || '';
+	my $checksum = lc($cfg{checksum} || '');
+	my $version = $cfg{version} || '';
+	return component_update_response(success => 0, status => 'invalid_component', message => 'Invalid component.') if($component ne 'linux_agent' && $component ne 'windows_agent');
+	return component_update_response(success => 0, status => 'invalid_archive_url', message => 'Provide an https archive_url.') if($archive_url !~ m{^https://} || $archive_url =~ /[\r\n\0\s]/);
+	return component_update_response(success => 0, status => 'invalid_checksum', message => 'Invalid SHA-256 checksum.') if($checksum !~ /^[0-9a-f]{64}$/);
+	return component_update_response(success => 0, status => 'invalid_version', message => 'Invalid release version.') if($version !~ /^[A-Za-z0-9._\/-]{1,128}$/);
+
+	# Refuse a second update while one is still running (state written in the last 15 minutes).
+	my $state_file = AGENT_UPDATE_STATE_FILE;
+	if (-f $state_file && (time - (stat($state_file))[9]) < 900 && open(my $sfh, '<', $state_file))
+	{
+		local $/;
+		my $raw = <$sfh>;
+		close($sfh);
+		return component_update_response(success => 0, status => 'busy', message => 'An update is already running. Wait for it to finish.')
+			if (defined $raw && $raw =~ /"status"\s*:\s*"running"/);
+	}
+
+	my $stage_dir = Path::Class::Dir->new(AGENT_RUN_DIR, 'agent_update_stage')->stringify;
+	system('rm', '-rf', $stage_dir);
+	mkdir($stage_dir) or return component_update_response(success => 0, status => 'write_failed', message => "Cannot create staging folder: $!");
+	my $zip = "$stage_dir/release.zip";
+
+	if(system('curl', '-fsSL', '--max-time', '300', '-o', $zip, $archive_url) != 0)
+	{
+		return component_update_response(success => 0, status => 'download_failed', message => 'Could not download the release archive.');
+	}
+
+	my $sha_output = `sha256sum \Q$zip\E 2>/dev/null`;
+	my ($actual) = $sha_output =~ /^([0-9a-fA-F]{64})/;
+	$actual = lc($actual || '');
+	if($actual ne $checksum)
+	{
+		write_agent_update_state(status => 'failed', message => 'Downloaded release checksum did not match; nothing was changed.', version_target => $version, component => $component, updated_at => scalar gmtime(), rollback_performed => 0);
+		return component_update_response(success => 0, status => 'checksum_mismatch', message => 'Downloaded release checksum did not match; nothing was changed.');
+	}
+
+	my %state = (
+		status => 'running',
+		message => 'Release downloaded and verified. The agent is stopping; the update helper will install it and restart the agent.',
+		version_target => $version,
+		version_before => AGENT_VERSION,
+		component => $component,
+		rollback_performed => 0,
+		updated_at => scalar gmtime(),
+	);
+	write_agent_update_state(%state);
+
+	my $service = $Cfg::Config{service_name} || 'agent_core';
+	$service = 'agent_core' unless $service =~ /^[A-Za-z0-9_.-]{1,64}$/;
+	my $helper = Path::Class::File->new(AGENT_RUN_DIR, 'agent_update_helper.sh')->stringify;
+	my $command = join(' ',
+		'nohup', 'bash', agent_update_shell_quote($helper),
+		'--agent-dir', agent_update_shell_quote(AGENT_RUN_DIR . ''),
+		'--zip', agent_update_shell_quote($zip),
+		'--sha256', agent_update_shell_quote($checksum),
+		'--version', agent_update_shell_quote($version),
+		'--agent-pid', $$,
+		'--service-name', agent_update_shell_quote($service),
+		'--state-file', agent_update_shell_quote(AGENT_UPDATE_STATE_FILE . ''),
+		'--log-file', agent_update_shell_quote(AGENT_UPDATE_LOG_FILE . ''),
+		'>/dev/null 2>&1', '&'
+	);
+	system($command);
+	logger("Agent update to $version started; update helper launched.");
+	return component_update_response(%state, success => 1);
+}
 sub agent_self_update
 {
 	return component_update_response(success => 0, status => 'bad_encryption', message => 'Bad Encryption Key')
 		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
 	my ($payload) = decrypt_params(@_);
 	my %cfg = component_update_parse_payload($payload);
+		# The panel now sends a release archive_url+checksum+version for an
+		# on-demand update (the same payload the Windows agent gets); apply it
+		# the same way Windows does. Fall back to the older git repo_url+branch
+		# request below (applied at the agent's next normal restart) when no
+		# archive_url is present, for backward compatibility.
+		return start_agent_update(%cfg) if (($cfg{archive_url} || '') ne '');
+
 	my $component = $cfg{component} || 'linux_agent';
 	my $repo_url = $cfg{repo_url} || '';
 	my $branch = $cfg{branch} || '';
