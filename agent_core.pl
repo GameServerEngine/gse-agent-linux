@@ -6940,7 +6940,21 @@ sub agent_restart
 	my $dec_check = decrypt_param(@_);
 	if ($dec_check eq 'restart')
 	{
-		chdir AGENT_RUN_DIR;
+			# Installs done by the current installer run the agent as a systemd
+			# service (agent_core, or gse-agent-<id> if that name was taken; see
+			# Cfg::Config{service_name}, set by the installer). Restart through
+			# systemd when that unit is active, mirroring how the Windows agent
+			# restarts its Windows service; fall back to the legacy screen-based
+			# restart below for older or manually-run installs with no service.
+			my $service = $Cfg::Config{service_name} || 'agent_core';
+			$service = 'agent_core' unless $service =~ /^[A-Za-z0-9_.-]{1,64}$/;
+			if (system("systemctl is-active --quiet $service") == 0)
+			{
+				system("bash -c 'sleep 2; systemctl restart $service' >/dev/null 2>&1 &");
+				return 1;
+			}
+
+			chdir AGENT_RUN_DIR;
 			if(-e "agent_core_run.pid")
 			{
 				my $run_pid_file = "agent_core_run.pid";
