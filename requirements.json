@@ -1,0 +1,33 @@
+{
+ "schema": 1,
+ "component": "gse-agent-linux",
+ "title": "GSE Linux Agent",
+ "minimum_os": [
+  {
+   "name": "Debian / Ubuntu family (apt, dpkg, systemd)",
+   "minimum": null
+  }
+ ],
+ "tested_on": [],
+ "prerequisites": [
+  {
+   "name": "Perl and the Perl modules in install_agent_prereqs.sh",
+   "note": "libxml-parser-perl, libpath-class-perl, libarchive-extract-perl, libarchive-zip-perl, libhttp-daemon-perl, libfrontier-rpc-perl, libfile-copy-recursive-perl, libschedule-cron-perl, libio-compress-perl, libcompress-raw-zlib-perl, libfile-find-rule-perl, libwww-perl"
+  },
+  {
+   "name": "screen, rsync, sudo, e2fsprogs, unzip, subversion, git, curl, bzip2",
+   "note": "Installed by install_agent_prereqs.sh."
+  },
+  {
+   "name": "pure-ftpd",
+   "note": "Game folder FTP."
+  },
+  {
+   "name": "Root access to install",
+   "note": "install_agent_prereqs.sh and install.sh must run as root (sudo)."
+  }
+ ],
+ "unverified": [
+  "The exact minimum Debian and Ubuntu release is not yet set or tested."
+ ]
+}
