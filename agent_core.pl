@@ -3249,7 +3249,7 @@ sub wildcard_pattern_to_regex
 	}
 
 	return undef if $in_class;
-	return qr/^$regex\z/i;
+	return qr/^$regex\z/;
 }
 
 sub resolve_latest_log_match
@@ -3269,7 +3269,10 @@ sub resolve_latest_log_match
 	return undef unless defined($regex);
 	my $glob_pattern = $pattern;
 	$glob_pattern =~ s/\[([^\]]+)\]/\*/g;
-	my @matches = bsd_glob("$home_path/$glob_pattern", GLOB_NOSORT);
+	# Escape glob characters in the home path so only the log pattern is expanded.
+	my $safe_home = $home_abs;
+	$safe_home =~ s/([\\*?\[\]{}~])/\\$1/g;
+	my @matches = bsd_glob("$safe_home/$glob_pattern", GLOB_NOSORT);
 	my @candidates = ();
 	foreach my $candidate (@matches)
 	{
