@@ -171,6 +171,8 @@ is_local_ip() { ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | g
 LISTEN_IP=0.0.0.0
 is_local_ip "$AGENT_IP" && LISTEN_IP="$AGENT_IP"
 
+SERVICE=agent_core
+[ ! -e /etc/systemd/system/agent_core.service ] || SERVICE="gse-agent-$SERVER_ID"
 cat > "$AGENT_DIR/Cfg/Config.pm" <<EOF
 %Cfg::Config = (
 	logfile => '$(pq "$AGENT_DIR")/agent_core.log',
@@ -181,6 +183,7 @@ cat > "$AGENT_DIR/Cfg/Config.pm" <<EOF
 	steam_license => 'Accept',
 	sudo_password => '$(pq "$PASSWORD")',
 	web_api_url => '$(pq "$PANEL")/api.php',
+	service_name => '$SERVICE',
 	agent_event_url => '$(pq "$PANEL")/agent_event_receiver.php',
 	remote_server_id => '$SERVER_ID',
 	steam_dl_limit => '0',
@@ -223,8 +226,6 @@ if [ -d /etc/pure-ftpd ]; then
 fi
 
 # ---------- service ----------
-SERVICE=agent_core
-[ ! -e /etc/systemd/system/agent_core.service ] || SERVICE="gse-agent-$SERVER_ID"
 say "Installing the systemd service $SERVICE"
 sed -e "s#{AGENT_USER}#$AGENT_USER#g" -e "s#{AGENT_PATH}#$AGENT_DIR#g" \
 	-e "s#{AGENT_RUN_SCRIPT}#$AGENT_DIR/agent_core_run#g" -e "s#{AGENT_PID_FILE}#$AGENT_DIR/agent_core_run.pid#g" \
