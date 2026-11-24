@@ -3,6 +3,7 @@
 Each fixed issue gets an entry under the version that shipped it: a one-line title, then the cause and the fix in plain language, written so a customer can follow it.
 
 ## Unreleased
+- **Agent update works:** a release download that worked was reported as "Could not download the release archive", because the agent read the download's exit code wrongly. It now reads the real one.
 - **Runs games like the Windows agent:** Start, Stop, Force Stop, Restart, status and a check every 5 seconds now use `GameManager.pm`, the same file as the Windows agent; `GameManagerLinux.pm` does the Linux process and port checks. A server wanted RUNNING is started or adopted after an agent restart or a reboot, the game port is freed before a launch, a start that does not answer on its port within 5 minutes is retried once, a game that dies is restarted at once after three missed checks (5 crashes in 30 minutes leave it FAILED), and a clean exit (code 0) is relaunched without counting a crash. The old bash watchdog stopped a server for good when its game died within 120 seconds. Games still run in screen as their own user, so they keep running when the agent stops, and the panel's console and log work as before.
 - **Game folder:** the game files are in `<server folder>/gamefiles`, as on Windows (it was `<server folder>/<game key>`).
 - **Pre-start commands and environment variables:** kept from the game config, with the CPU and priority settings, in `gse_prestart.sh`, and run before every launch, also automatic restarts.
