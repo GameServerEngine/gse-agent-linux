@@ -7,7 +7,7 @@ contract inspected on 2026-07-27.
 
 Linux must expose the same lifecycle semantics as Windows and Panel. Only the
 mechanics differ: Linux uses `screen`, shell PID capture, signals, `/proc`, and
-Linux TCP/UDP owner tools instead of Windows batch, PowerShell, and `taskkill`.
+Linux TCP/UDP owner tools instead of the Windows batch files and Windows process tools.
 
 ## Scope
 
@@ -21,14 +21,14 @@ operator before enabling the new layout.
 ## Authoritative Layout
 
 `management_home` is the server-ID directory assigned to one managed game
-server. `game_root` is a child directory beneath it named from the validated XML
-`game_key`:
+server. `game_root` is its `gamefiles` child, the same as on Windows. The XML
+`game_key` is still validated:
 
 ```text
-management_home/<validated game_key>
+management_home/gamefiles
 ```
 
-The `game_key` must be validated before path construction. It is one safe path
+The `game_key` must be validated before Start. It is one safe path
 segment only: not empty, no surrounding whitespace, no traversal, no slash or
 backslash, no drive prefix or colon, no control characters, no reserved device
 names, only ASCII letters, digits, dot, underscore, and dash, no trailing dot,
@@ -39,12 +39,20 @@ game configs, mods, missions, saves, Workshop payload, and user content. GSP
 management artifacts belong in `management_home` or agent-root runtime
 directories, never beneath `game_root`.
 
-Linux Start derives `game_root` from `management_home` and the XML `game_key`
-inside the agent before resolving the executable working directory. During the
-Panel transition the agent accepts both `run_dir=<game_key>/...` and
-`run_dir=...`; both resolve to the same path beneath `game_root`. A Start with
-an invalid key, missing game root, absolute run directory, traversal, or a path
-escaping `game_root` fails before watchdog generation.
+Linux Start derives `game_root` (`management_home/gamefiles`) inside the agent
+before resolving the executable working directory. It accepts both
+`run_dir=gamefiles/...` and `run_dir=...`; both resolve to the same path beneath
+`game_root`. A Start with an invalid key, missing game root, absolute run
+directory, traversal, or a path escaping `game_root` fails before launch.
+
+Start, Stop, Force Stop, Restart, status and the 5 second check are run by
+`GameManager.pm`, the same file as the Windows agent (see the Windows agent's
+docs for its rules). `GameManagerLinux.pm` supplies the Linux process and port
+checks. The game runs in a detached `screen` session (title
+`SCREEN_HOME_<id>`, for the panel's console and log) as the server's user;
+`serverStart.sh` in `management_home` is rewritten before every launch and
+loads `gse_prestart.sh` (environment, CPU and priority prefix, and the game
+config's pre-start commands, written at Start). The state is `management_home/status`.
 
 Management artifacts that must not be created beneath `game_root` include
 watchdog scripts, status markers, PID files, bot definitions, runtime metadata,
@@ -329,7 +337,7 @@ screen, watchdog, bot, game, and assigned TCP/UDP port owners are inactive.
 ## Platform-Specific Difference
 
 Windows may use PowerShell only for reliable process launch PID capture and
-TCP/UDP owner discovery, then `taskkill /PID <pid> /T /F` for known trees.
+TCP/UDP owner discovery, then a forced kill of each known process tree.
 Linux must use native process mechanics: shell PID capture, process groups,
 signals, `/proc`/process inspection, and Linux port-owner tools. The returned
 contract and filenames remain the same.

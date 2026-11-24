@@ -11,16 +11,16 @@ The local workspace folder is still named `GSP` for historical compatibility. Tr
 GSE is a multi-repository system. Treat the repositories below as one product with separate source control boundaries:
 
 - `Panel` - GameServer Engine management console, control plane, shared documentation, admin tooling, and user-facing web modules
-- `GSP-Agent-Linux` - Linux execution engine and OGP-compatible Perl agent
-- `GSP-Agent-Windows` - Windows/Cygwin execution engine and OGP-compatible Perl agent
+- `GSE Agent Linux` - Linux execution engine and OGP-compatible Perl agent
+- `GSE Agent Windows` - Windows/Cygwin execution engine and OGP-compatible Perl agent
 
 ## Repository routing
 
 - Workspace root: `/home/dev/Projects/GSP` (multi-repository container; not itself a Git repository).
 - Panel/control-plane repository: `/home/dev/Projects/GSP/Panel`.
 - Gameservers.World storefront: `/home/dev/Projects/GSP/Panel/modules/billing`.
-- Linux agent repository: `/home/dev/Projects/GSP/GSP-Agent-Linux`.
-- Windows agent repository: `/home/dev/Projects/GSP/GSP-Agent-Windows`.
+- Linux agent repository: `/home/dev/projects/gse-agent-linux`.
+- Windows agent repository: `/home/dev/projects/gse-agent-windows`.
 
 Storefront-only work must run Codex with `/home/dev/Projects/GSP/Panel` as the Git working tree and must edit `modules/billing` within that repository.
 
@@ -54,8 +54,8 @@ Rules:
 | Repository | Ownership | Primary runtime role | Important notes |
 | --- | --- | --- | --- |
 | `Panel` | GameServer Engine management console, shared docs, admin tools, and Gameservers.World storefront module | Control plane | The Panel is authoritative for user actions and business logic. Gameservers.World lives under `modules/billing`; it is not a separate top-level repository and is not the whole Panel. |
-| `GSP-Agent-Linux` | Linux agent and Linux runtime layer | Execution engine | Uses Linux-native process management and aligns with panel RPC expectations. |
-| `GSP-Agent-Windows` | Windows agent and Cygwin runtime layer | Execution engine | Uses Cygwin to mirror Linux behavior as closely as practical. |
+| `GSE Agent Linux` | Linux agent and Linux runtime layer | Execution engine | Uses Linux-native process management and aligns with panel RPC expectations. |
+| `GSE Agent Windows` | Windows agent and Cygwin runtime layer | Execution engine | Uses Cygwin to mirror Linux behavior as closely as practical. |
 
 ## Architecture model
 
@@ -122,7 +122,7 @@ Use these as the first files to read in each repository:
 - `docs/COMMAND_FLOW.md`
 - `docs/UPDATE_POLICY.md`
 
-### GSP-Agent-Linux
+### GSE Agent Linux
 
 - `README.md`
 - `docs/AGENT_ARCHITECTURE.md`
@@ -130,7 +130,7 @@ Use these as the first files to read in each repository:
 - `docs/PROCESS_MANAGEMENT.md`
 - `docs/PANEL_INTEGRATION.md`
 
-### GSP-Agent-Windows
+### GSE Agent Windows
 
 - `README.md`
 - `docs/AGENT_ARCHITECTURE.md`

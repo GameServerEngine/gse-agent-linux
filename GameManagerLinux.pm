@@ -227,7 +227,7 @@ sub port_listening {
 	return parse_ss_listening($out, $port);
 }
 
-# Kills a process and its whole tree (like taskkill /F /T).
+# Kills a process and its whole tree, as the Windows agent does.
 sub kill_pid {
 	my ($pid) = @_;
 	return 0 unless $pid && $pid =~ /^\d+$/ && $pid > 1;

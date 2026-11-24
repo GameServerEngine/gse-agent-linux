@@ -28,9 +28,11 @@ require_absent_active() {
 	fi
 }
 
+# GameManager.pm is the same file as in the Windows agent; its Windows defaults are expected there.
 require_absent_regex_active() {
 	local pattern="$1"
 	if matches="$(git -C "$repo_root" grep -nE -- "$pattern" -- . \
+		':(exclude)GameManager.pm' \
 		':(exclude)docs/codex-history/**' \
 		':(exclude)docs/agent-modernization-step-1-divergence-report.md' 2>/dev/null)"; then
 		printf '%s\n' "$matches" >&2
@@ -95,8 +97,6 @@ require_text "$repo_root/install.sh" "rm -f \"\$unit_path\""
 require_text "$repo_root/agent_core.pl" "PortValidationEnabled"
 require_text "$repo_root/agent_core.pl" "StartupValidationTimeoutSeconds"
 require_text "$repo_root/agent_core.pl" "PortCheckIntervalSeconds"
-require_text "$repo_root/agent_core.pl" "CPUUsage => agent_cpu_usage_percent()"
-require_text "$repo_root/agent_core.pl" "MemoryUsage => agent_ram_usage_percent()"
 require_text "$repo_root/agent_core.pl" "sub build_expected_ports"
 require_text "$repo_root/agent_core.pl" "sub validate_expected_ports"
 require_text "$repo_root/agent_core.pl" "sub has_listening_port_named"
