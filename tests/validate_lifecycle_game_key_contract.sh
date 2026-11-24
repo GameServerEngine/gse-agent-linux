@@ -52,18 +52,18 @@ perl -0ne '
 	}
 
 	my ($ok, $game_root, $error) = resolve_game_root_without_decrypt("/srv/games/42", "arma3_linux64");
-	assert_ok($ok && $game_root eq "/srv/games/42/arma3_linux64", "valid game_key derives game_root");
+	assert_ok($ok && $game_root eq "/srv/games/42/gamefiles", "a valid game_key gives game_root <home>/gamefiles (as on Windows)");
 
 	for my $bad_key ("", " ../ark", "../ark", "ark/evil", "ark\\evil", "ark:evil", "ark..evil", "bad key", "CON", "LPT1", "game.") {
 		my ($bad_ok, undef, $bad_error) = resolve_game_root_without_decrypt("/srv/games/42", $bad_key);
 		assert_ok(!$bad_ok && $bad_error ne "", "unsafe game_key was rejected: $bad_key");
 	}
 
-	my ($prefixed_ok, $prefixed_path) = resolve_game_payload_path_without_decrypt("/srv/games/42", "arma3_linux64", "arma3_linux64/bin");
-	assert_ok($prefixed_ok && $prefixed_path eq "/srv/games/42/arma3_linux64/bin", "Panel game_key-prefixed run_dir resolves once");
+	my ($prefixed_ok, $prefixed_path) = resolve_game_payload_path_without_decrypt("/srv/games/42", "arma3_linux64", "gamefiles/bin");
+	assert_ok($prefixed_ok && $prefixed_path eq "/srv/games/42/gamefiles/bin", "a gamefiles-prefixed run_dir resolves once");
 
 	my ($relative_ok, $relative_path) = resolve_game_payload_path_without_decrypt("/srv/games/42", "arma3_linux64", "bin");
-	assert_ok($relative_ok && $relative_path eq "/srv/games/42/arma3_linux64/bin", "relative run_dir resolves beneath game_root");
+	assert_ok($relative_ok && $relative_path eq "/srv/games/42/gamefiles/bin", "relative run_dir resolves beneath game_root");
 
 	for my $bad_path ("../escape", "/srv/other", "C:/escape", "bin/../../escape") {
 		my ($path_ok, undef, $path_error) = resolve_game_payload_path_without_decrypt("/srv/games/42", "arma3_linux64", $bad_path);
@@ -71,49 +71,6 @@ perl -0ne '
 	}
 ' "$agent" || fail "game-key helper behavior failed"
 
-perl -0ne '
-	use File::Temp qw(tempdir);
-	my $source = $_;
-	$source =~ /(sub desired_state_paths_without_decrypt\s*\{.*?)(?=\n# Remove lifecycle PID\/timestamp metadata)/s
-		or die "cannot extract desired-state helper block\n";
-	eval $1;
-	die $@ if $@;
-
-	sub assert_ok {
-		my ($condition, $message) = @_;
-		die "$message\n" unless $condition;
-	}
-
-	my $home = tempdir(CLEANUP => 1);
-	my ($state, $reason) = read_desired_state_without_decrypt($home);
-	assert_ok($state eq "stopped" && $reason eq "missing", "missing marker fails safe as stopped");
-
-	assert_ok(write_desired_state_without_decrypt($home, "running"), "running marker writes successfully");
-	($state, $reason) = read_desired_state_without_decrypt($home);
-	assert_ok($state eq "running" && $reason eq "ok", "valid running marker is accepted");
-
-	open(my $BAD, ">", "$home/status.running") or die $!;
-	print {$BAD} "not-a-valid-marker\n";
-	close($BAD);
-	($state, $reason) = read_desired_state_without_decrypt($home);
-	assert_ok($state eq "stopped" && $reason eq "invalid", "malformed running marker fails safe as stopped");
-
-	open(my $MISMATCH, ">", "$home/status.running") or die $!;
-	print {$MISMATCH} "123,stopped\n";
-	close($MISMATCH);
-	($state, $reason) = read_desired_state_without_decrypt($home);
-	assert_ok($state eq "stopped" && $reason eq "invalid", "mismatched running marker content fails safe as stopped");
-
-	assert_ok(write_desired_state_without_decrypt($home, "stopped"), "stopped marker writes successfully");
-	($state, $reason) = read_desired_state_without_decrypt($home);
-	assert_ok($state eq "stopped" && $reason eq "ok", "valid stopped marker is accepted");
-
-	open(my $RUNNING, ">", "$home/status.running") or die $!;
-	print {$RUNNING} "123,running\n";
-	close($RUNNING);
-	($state, $reason) = read_desired_state_without_decrypt($home);
-	assert_ok($state eq "stopped" && $reason eq "conflicting", "conflicting markers fail safe as stopped");
-' "$agent" || fail "desired-state helper behavior failed"
 
 perl <<'PERL' || exit 1
 use strict;
@@ -385,17 +342,10 @@ require_text 'sub resolve_game_payload_path_without_decrypt'
 require_text 'return -17;'
 require_text 'my ($game_root_ok, $game_root, $game_root_error) = resolve_game_root_without_decrypt($home_path, $game_key);'
 require_text 'my ($payload_path_ok, $game_binary_dir, $payload_path_error) = resolve_game_payload_path_without_decrypt($home_path, $game_key, $run_dir);'
-require_text 'my ($desired_state, $desired_state_reason) = read_desired_state_without_decrypt($home_path);'
-require_text 'Skipping automatic startup for HOME ID:$home_id because desired state is $desired_state ($desired_state_reason).'
 require_text 'prepare_server_content_runtime_without_decrypt($home_path);'
-require_text 'create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir, $server_port);'
-require_text 'backup_home_log( $home_id, $log_file, $game_root . "/" . $console_log );'
 require_text '$startup_cmd = replace_Env_Vars($screen_id, $home_id, $game_root, $startup_cmd, $game_key);'
-require_text '$line = replace_Env_Vars("", $home_id, $game_root, $line, $game_key);'
-require_text 'run_before_start_commands($home_id, $home_path, $preStart, $owner);'
-require_text 'my $server_start_bashfile = "$home_path/serverStart.sh";'
-require_text 'return ("$home_path/status.running", "$home_path/status.stopped");'
-require_text 'foreach my $name ("watchdog.pid", "bot.pid", "game.pid", "game.launch_ts")'
+require_text '$line = replace_Env_Vars($screen_id, $home_id, $game_root, $line, $game_key);'
+require_text 'my $gm_result = gm()->start($home_id, command => $command, workdir => $game_binary_dir, port => $server_port);'
 require_text 'my $secure = "$management_scripts_path/secure.sh";'
 require_text 'create_secure_script($home_path, $exec_folder_path, $exec_path, $bash_scripts_path);'
 require_text 'my $postcmdfile = Path::Class::File->new(MANUAL_TMP_DIR, "postinstall.$$.".time().".sh");'
@@ -403,9 +353,8 @@ require_text 'my $secure = "$bash_scripts_path/secure.sh";'
 require_absent_text 'my $secure = "$mods_full_path/secure.sh";'
 require_absent_text 'my $postcmdfile = $destination."/".'\''postinstall.sh'\'';'
 
-require_order 'resolve_game_root_without_decrypt($home_path, $game_key);' 'hard_stop_server_without_decrypt($home_id, $server_ip, $server_port, $home_path, remove_startup => 0, preflight => 1);'
-require_order 'resolve_game_payload_path_without_decrypt($home_path, $game_key, $run_dir);' 'secure_path_without_decrypt('\''chattr-i'\'', $server_exe);'
-require_order 'prepare_server_content_runtime_without_decrypt($home_path);' 'write_desired_state_without_decrypt($home_path, "running")'
-require_order 'my ($desired_state, $desired_state_reason) = read_desired_state_without_decrypt($home_path);' 'universal_start_without_decrypt('
+require_order 'resolve_game_root_without_decrypt($home_path, $game_key);' 'gm()->start($home_id'
+require_order 'resolve_game_payload_path_without_decrypt($home_path, $game_key, $run_dir);' 'secure_path_without_decrypt('\''chattr-i'\'', $exe_path);'
+require_order 'gm_write_prestart($home_id' 'gm()->start($home_id'
 
 echo "Linux lifecycle game-key path contract validation passed."

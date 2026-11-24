@@ -19,3 +19,6 @@ steamcmd/*.tmp
 # in the repo or a release archive (Windows agent does the same).
 Cfg/Config.pm
 Cfg/Preferences.pm
+
+# Server folder index written by the agent (homes/<id> holds the folder of server <id>).
+homes/

@@ -46,7 +46,10 @@ require_file "$repo_root/agent_core_run"
 require_file "$repo_root/systemd/agent_core.service"
 require_file "$repo_root/Cfg/bash_prefs.cfg.default"
 require_file "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh"
-require_file "$repo_root/tests/validate_watchdog_stop_contract.sh"
+require_file "$repo_root/GameManager.pm"
+require_file "$repo_root/GameManagerLinux.pm"
+require_file "$repo_root/gm_proc_table.pl"
+require_file "$repo_root/gse_ctl.pl"
 require_file "$repo_root/tests/validate_lifecycle_game_key_contract.sh"
 require_file "$repo_root/steamcmd/steamcmd.sh"
 require_file "$repo_root/steamcmd/linux32/steamcmd"
@@ -60,10 +63,12 @@ require_file "$repo_root/steamcmd/linux32/crashhandler.so"
 perl -c "$repo_root/agent_core.pl" >/dev/null
 bash -n "$repo_root/install.sh" "$repo_root/install_agent_prereqs.sh" "$repo_root/agent_conf.sh" "$repo_root/agent_core_run"
 bash -n "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh"
-bash -n "$repo_root/tests/validate_watchdog_stop_contract.sh"
+perl -c -I"$repo_root" "$repo_root/GameManagerLinux.pm" 2>/dev/null
 bash -n "$repo_root/tests/validate_lifecycle_game_key_contract.sh"
 "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh" >/dev/null
-"$repo_root/tests/validate_watchdog_stop_contract.sh" >/dev/null
+perl "$repo_root/tests/gamemanager_desired_state_test.pl" >/dev/null
+perl "$repo_root/tests/gamemanager_reality.t" >/dev/null
+perl "$repo_root/tests/validate_gamemanager_linux.pl" >/dev/null
 "$repo_root/tests/validate_lifecycle_game_key_contract.sh" >/dev/null
 
 for file in "$repo_root/install.sh" "$repo_root/agent_conf.sh" "$repo_root/Cfg/bash_prefs.cfg.default"; do
