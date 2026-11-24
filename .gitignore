@@ -22,3 +22,6 @@ Cfg/Preferences.pm
 
 # Server folder index written by the agent (homes/<id> holds the folder of server <id>).
 homes/
+
+# Leroy run logs
+.devplus/
