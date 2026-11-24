@@ -2,6 +2,13 @@
 
 Each fixed issue gets an entry under the version that shipped it: a one-line title, then the cause and the fix in plain language, written so a customer can follow it.
 
+## Unreleased
+- **Runs games like the Windows agent:** Start, Stop, Force Stop, Restart, status and a check every 5 seconds now use `GameManager.pm`, the same file as the Windows agent; `GameManagerLinux.pm` does the Linux process and port checks. A server wanted RUNNING is started or adopted after an agent restart or a reboot, the game port is freed before a launch, a start that does not answer on its port within 5 minutes is retried once, a game that dies is restarted at once after three missed checks (5 crashes in 30 minutes leave it FAILED), and a clean exit (code 0) is relaunched without counting a crash. The old bash watchdog stopped a server for good when its game died within 120 seconds. Games still run in screen as their own user, so they keep running when the agent stops, and the panel's console and log work as before.
+- **Game folder:** the game files are in `<server folder>/gamefiles`, as on Windows (it was `<server folder>/<game key>`).
+- **Pre-start commands and environment variables:** kept from the game config, with the CPU and priority settings, in `gse_prestart.sh`, and run before every launch, also automatic restarts.
+- **Start and stop on the host:** each server folder gets `startserver.sh` and `stopserver.sh`, which record RUNNING or STOPPED through `gse_ctl.pl`; the bot is `_alsoRun.sh` and runs only while its game is RUNNING. New `set_desired` RPC.
+- **Restart without a wait:** Restart starts the game right after the stop. The 60 second wait outlived the panel's request, so the start never ran and the server was left stopped.
+
 ## 0.5.1
 - **One-file installer:** `gse-agent-linux-install.sh` (attached to every release) asks for the panel address, the agent key from the panel's Servers page and the agent user's password; gets the server's settings and the release from the panel; installs the prerequisites, creates the user, writes the configuration, sets up Pure-FTPd, installs and starts the systemd service and tells the panel the agent is ready. Tested on Ubuntu 24.04 and Debian 12 against a test panel.
 - **The panel finds the agent's IP addresses:** the IP list came from parsing `/sbin/ifconfig`, which current Ubuntu and Debian do not install, so a new server got no IPs. It now reads `ip -o -4 addr show`.

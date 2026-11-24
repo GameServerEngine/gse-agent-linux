@@ -28,9 +28,11 @@ require_absent_active() {
 	fi
 }
 
+# GameManager.pm is the same file as in the Windows agent; its Windows defaults are expected there.
 require_absent_regex_active() {
 	local pattern="$1"
 	if matches="$(git -C "$repo_root" grep -nE -- "$pattern" -- . \
+		':(exclude)GameManager.pm' \
 		':(exclude)docs/codex-history/**' \
 		':(exclude)docs/agent-modernization-step-1-divergence-report.md' 2>/dev/null)"; then
 		printf '%s\n' "$matches" >&2
@@ -46,7 +48,10 @@ require_file "$repo_root/agent_core_run"
 require_file "$repo_root/systemd/agent_core.service"
 require_file "$repo_root/Cfg/bash_prefs.cfg.default"
 require_file "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh"
-require_file "$repo_root/tests/validate_watchdog_stop_contract.sh"
+require_file "$repo_root/GameManager.pm"
+require_file "$repo_root/GameManagerLinux.pm"
+require_file "$repo_root/gm_proc_table.pl"
+require_file "$repo_root/gse_ctl.pl"
 require_file "$repo_root/tests/validate_lifecycle_game_key_contract.sh"
 require_file "$repo_root/steamcmd/steamcmd.sh"
 require_file "$repo_root/steamcmd/linux32/steamcmd"
@@ -60,10 +65,12 @@ require_file "$repo_root/steamcmd/linux32/crashhandler.so"
 perl -c "$repo_root/agent_core.pl" >/dev/null
 bash -n "$repo_root/install.sh" "$repo_root/install_agent_prereqs.sh" "$repo_root/agent_conf.sh" "$repo_root/agent_core_run"
 bash -n "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh"
-bash -n "$repo_root/tests/validate_watchdog_stop_contract.sh"
+perl -c -I"$repo_root" "$repo_root/GameManagerLinux.pm" 2>/dev/null
 bash -n "$repo_root/tests/validate_lifecycle_game_key_contract.sh"
 "$repo_root/tests/validate_steamcmd_bootstrap_payload.sh" >/dev/null
-"$repo_root/tests/validate_watchdog_stop_contract.sh" >/dev/null
+perl "$repo_root/tests/gamemanager_desired_state_test.pl" >/dev/null
+perl "$repo_root/tests/gamemanager_reality.t" >/dev/null
+perl "$repo_root/tests/validate_gamemanager_linux.pl" >/dev/null
 "$repo_root/tests/validate_lifecycle_game_key_contract.sh" >/dev/null
 
 for file in "$repo_root/install.sh" "$repo_root/agent_conf.sh" "$repo_root/Cfg/bash_prefs.cfg.default"; do
@@ -90,8 +97,6 @@ require_text "$repo_root/install.sh" "rm -f \"\$unit_path\""
 require_text "$repo_root/agent_core.pl" "PortValidationEnabled"
 require_text "$repo_root/agent_core.pl" "StartupValidationTimeoutSeconds"
 require_text "$repo_root/agent_core.pl" "PortCheckIntervalSeconds"
-require_text "$repo_root/agent_core.pl" "CPUUsage => agent_cpu_usage_percent()"
-require_text "$repo_root/agent_core.pl" "MemoryUsage => agent_ram_usage_percent()"
 require_text "$repo_root/agent_core.pl" "sub build_expected_ports"
 require_text "$repo_root/agent_core.pl" "sub validate_expected_ports"
 require_text "$repo_root/agent_core.pl" "sub has_listening_port_named"

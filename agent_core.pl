@@ -46,6 +46,8 @@ use JSON::PP;
 use POSIX ();
 use Digest::SHA qw(hmac_sha256_hex);
 use Sys::Hostname qw(hostname);
+use GameManager;        # start, stop and monitor rules, shared with the Windows agent
+use GameManagerLinux;   # Linux process and port checks for GameManager
 
 # Compression tools
 use IO::Compress::Bzip2 qw(bzip2 $Bzip2Error); # Used to compress files to bz2.
@@ -649,54 +651,9 @@ elsif ($clear_startups)
 	closedir(STARTUPDIR);
 }
 # If the directory already existed check if we need to start some games.
-elsif ($no_startups != 1)
-{
-
-	# Loop through all the startup flags, and call universal startup
-	opendir(STARTUPDIR, GAME_STARTUP_DIR);
-	logger "Reading startup flags from " . GAME_STARTUP_DIR . "";
-	while (my $dirlist = readdir(STARTUPDIR))
-	{
-
-		# Skip . and .. plus runtime marker files.
-		next if $dirlist =~ /^\./;
-		next if $dirlist =~ /^(?:status|pid)-/;
-		logger "Found $dirlist";
-		open(STARTFILE, '<', Path::Class::Dir->new(GAME_STARTUP_DIR, $dirlist))
-		  || logger "Error opening start flag $!";
-		while (<STARTFILE>)
-		{
-			my (
-				$home_id,   $home_path,   $server_exe,
-				$run_dir,   $startup_cmd, $server_port,
-				$server_ip, $cpu, $nice, $preStart, $envVars, $game_key, $console_log
-			   ) = split(',', $_);
-
-			if (is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) ==
-				1)
-			{
-				logger
-				  "This server ($server_exe on $server_ip : $server_port) is already running (ID: $home_id).";
-				next;
-			}
-			my ($desired_state, $desired_state_reason) = read_desired_state_without_decrypt($home_path);
-			if($desired_state ne "running")
-			{
-				logger "Skipping automatic startup for HOME ID:$home_id because desired state is $desired_state ($desired_state_reason).";
-				next;
-			}
-
-			logger "Starting server_exe $server_exe from home $home_path.";
-			universal_start_without_decrypt(
-										 $home_id,   $home_path,   $server_exe,
-										 $run_dir,   $startup_cmd, $server_port,
-										 $server_ip, $cpu,	$nice, $preStart, $envVars, $game_key, $console_log
-										   );
-		}
-		close(STARTFILE);
-	}
-	closedir(STARTUPDIR);
-}
+# Servers wanted RUNNING are started (or adopted, if their game is still up) by the game
+# monitor's first pass (gm_monitor_all), as on Windows. Startup flags are kept for the
+# resource statistics only.
 
 # Create the pid file
 open(PID, '>', $agent_pid_file)
@@ -720,6 +677,7 @@ my $cron = new Schedule::Cron( \&scheduler_dispatcher, {
                                        } );
 
 $cron->add_entry( "* * * * * *", \&scheduler_read_tasks );
+$cron->add_entry( "* * * * * */5", \&gm_monitor_all );   # game monitor, every 5 seconds
 # Add resource stats collection task if configured
 if (defined STATS_FREQUENCY_MINUTES && STATS_FREQUENCY_MINUTES =~ /^\d+$/ && STATS_FREQUENCY_MINUTES > 0) {
 	logger "Scheduling resource stats collection every " . STATS_FREQUENCY_MINUTES . " minutes.";
@@ -1073,6 +1031,7 @@ my $d = Frontier::Daemon::GSP::Forking->new(
 					 server_status					=> \&server_status,
 					 force_stop_server				=> \&force_stop_server,
 					 universal_start			  	=> \&universal_start,
+					 set_desired					=> \&set_desired,
 				 renice_process					=> \&renice_process,
 				 cpu_count						=> \&cpu_count,
 				 rfile_exists				 	=> \&rfile_exists,
@@ -1308,279 +1267,6 @@ sub shell_single_quote
 	return "'" . $value . "'";
 }
 
-sub create_screen_cmd_loop
-{
-	my ($screen_id, $exec_cmd, $envVars, $skipLoop, $status_hint_file, $home_path, $game_workdir, $game_port) = @_;
-
-	$exec_cmd = replace_Env_Vars($screen_id, "", "", $exec_cmd);
-	$home_path = "." unless(defined($home_path) && $home_path ne "");
-	$game_workdir = "." unless(defined($game_workdir) && $game_workdir ne "");
-
-	my $quoted_home_path = shell_single_quote($home_path);
-	my $quoted_game_workdir = shell_single_quote($game_workdir);
-	my $quoted_exec_cmd = shell_single_quote($exec_cmd);
-	my $server_start_bashfile = "$home_path/serverStart.sh";
-	my $quoted_watchdog_path = shell_single_quote($server_start_bashfile);
-	my $autorestart_enabled = defined($skipLoop) && $skipLoop ? "0" : "1";
-	my $quoted_game_port = shell_single_quote(defined($game_port) && $game_port =~ /^[0-9]+$/ ? $game_port : "");
-	my $quoted_screen_id = shell_single_quote($screen_id);
-	# The command that starts this watchdog inside screen. The panel Start runs it, and so does
-	# startserver.sh, so a start by hand is the same start.
-	my $screen_start_command = sprintf('export WINEDEBUG="fixme-all" && export DISPLAY=:1 && screen -d -m -t "%1$s" -c ' . SCREENRC_FILE . ' -S %1$s %2$s',
-									   $screen_id, "bash " . $quoted_watchdog_path);
-	my $quoted_screen_start_command = shell_single_quote($screen_start_command);
-
-	if(-e $server_start_bashfile){
-		secure_path_without_decrypt('chattr-i', $server_start_bashfile);
-	}
-
-	open (SERV_START_SCRIPT, '>', $server_start_bashfile);
-
-	my @watchdog_lines = (
-		'#!/bin/bash',
-		'set +e',
-		"HOME_PATH=$quoted_home_path",
-		"GAME_WORKDIR=$quoted_game_workdir",
-		"GAME_COMMAND=$quoted_exec_cmd",
-		"AUTORESTART_ENABLED=$autorestart_enabled",
-		"GAME_PORT=$quoted_game_port",
-		"SCREEN_ID=$quoted_screen_id",
-		"SCREEN_START_COMMAND=$quoted_screen_start_command",
-		'cd "$HOME_PATH" || exit 1',
-		'umask 077',
-		'[ "$1" = "start" ] || [ "$1" = "stop" ] || echo "$$" > "$HOME_PATH/watchdog.pid"',
-		'',
-		'log_event() {',
-		'    printf "%s %s\n" "$(date -Is 2>/dev/null || date)" "$*" >&2',
-		'}',
-		'',
-		'is_running_state() {',
-		'    [ -r "$HOME_PATH/status.running" ] && [ ! -e "$HOME_PATH/status.stopped" ]',
-		'}',
-		'',
-		'read_number_file() {',
-		'    value=""',
-		'    [ -r "$1" ] && read -r value < "$1"',
-		'    case "$value" in ""|*[!0-9]*) return 1 ;; esac',
-		'    printf "%s\n" "$value"',
-		'}',
-		'',
-		'publish_stopped_state() {',
-		'    tmp="$HOME_PATH/status.stopped.$$.$(date +%s).tmp"',
-		'    if printf "%s,stopped\n" "$(date +%s)" > "$tmp"; then',
-		'        chmod 0644 "$tmp"',
-		'        mv -f "$tmp" "$HOME_PATH/status.stopped"',
-		'    fi',
-		'    rm -f "$HOME_PATH/status.running"',
-		'}',
-		'',
-		'publish_running_state() {',
-		'    tmp="$HOME_PATH/status.running.$$.$(date +%s).tmp"',
-		'    if printf "%s,running\n" "$(date +%s)" > "$tmp"; then',
-		'        chmod 0644 "$tmp"',
-		'        mv -f "$tmp" "$HOME_PATH/status.running"',
-		'    fi',
-		'    rm -f "$HOME_PATH/status.stopped"',
-		'}',
-		'',
-		'# A game that is already up on its port (started by hand, or left by an earlier watchdog) is',
-		'# taken over, never launched a second time. Returns 0 when one is up. The pid is recorded when',
-		'# it can be seen.',
-		'adopt_running_game() {',
-		'    [ -n "$GAME_PORT" ] || return 1',
-		'    listeners="$(ss -H -lntup 2>/dev/null | grep -E "[:.]$GAME_PORT[[:space:]]")"',
-		'    [ -n "$listeners" ] || return 1',
-		'    owner="$(printf "%s\n" "$listeners" | grep -o "pid=[0-9]*" | head -1 | cut -d= -f2)"',
-		'    if [ -n "$owner" ]; then',
-		'        printf "%s\n" "$owner" > "$HOME_PATH/game.pid"',
-		'        echo 1 > "$HOME_PATH/game.launch_ts"',
-		'    fi',
-		'    return 0',
-		'}',
-		'',
-		'pid_alive() {',
-		'    case "$1" in ""|*[!0-9]*) return 1 ;; esac',
-		'    kill -0 "$1" >/dev/null 2>&1',
-		'}',
-		'',
-		'pid_pgid() {',
-		'    pid="$1"',
-		'    [ -r "/proc/$pid/stat" ] || return 1',
-		'    stat_line="$(cat "/proc/$pid/stat" 2>/dev/null)"',
-		'    stat_tail="${stat_line##*) }"',
-		'    set -- $stat_tail',
-		'    [ "$#" -ge 3 ] || return 1',
-		'    printf "%s\n" "$3"',
-		'}',
-		'',
-		'terminate_pid_group() {',
-		'    pid="$1"',
-		'    case "$pid" in ""|*[!0-9]*) return 0 ;; esac',
-		'    pgid="$(pid_pgid "$pid" 2>/dev/null)"',
-		'    [ -n "$pgid" ] || pgid="$pid"',
-		'    if [ "$pgid" = "$pid" ]; then',
-		'        kill -TERM -- "-$pgid" >/dev/null 2>&1',
-		'    else',
-		'        kill -TERM "$pid" >/dev/null 2>&1',
-		'    fi',
-		'    sleep 2',
-		'    if [ "$pgid" = "$pid" ]; then',
-		'        kill -KILL -- "-$pgid" >/dev/null 2>&1',
-		'    fi',
-		'    pid_alive "$pid" && kill -KILL "$pid" >/dev/null 2>&1',
-		'}',
-		'',
-		'cleanup_managed_processes() {',
-		'    terminate_pid_group "$(read_number_file "$HOME_PATH/bot.pid")"',
-		'    terminate_pid_group "$(read_number_file "$HOME_PATH/game.pid")"',
-		'    rm -f "$HOME_PATH/bot.pid" "$HOME_PATH/game.pid" "$HOME_PATH/game.launch_ts"',
-		'}',
-		'',
-		'load_bot_definition() {',
-		'    BOT_WORKDIR=""',
-		'    BOT_EXE=""',
-		'    BOT_COMMAND=""',
-		'    BOT_ARGS=""',
-		'    [ -r "$HOME_PATH/bot.def" ] || return 0',
-		'    while IFS="=" read -r key value; do',
-		'        case "$key" in',
-		'            workdir) BOT_WORKDIR="$value" ;;',
-		'            executable) BOT_EXE="$value" ;;',
-		'            command) BOT_COMMAND="$value" ;;',
-		'            arguments) BOT_ARGS="$value" ;;',
-		'        esac',
-		'    done < "$HOME_PATH/bot.def"',
-		'}',
-		'',
-		'launch_game() {',
-		'    is_running_state || exit 0',
-		'    cd "$GAME_WORKDIR" || exit 1',
-		'    if command -v setsid >/dev/null 2>&1; then',
-		'        setsid bash -lc "exec $GAME_COMMAND" >/dev/null 2>&1 &',
-		'    else',
-		'        bash -lc "exec $GAME_COMMAND" >/dev/null 2>&1 &',
-		'    fi',
-		'    game_pid="$!"',
-		'    printf "%s\n" "$game_pid" > "$HOME_PATH/game.pid"',
-		'    date +%s > "$HOME_PATH/game.launch_ts"',
-		'    cd "$HOME_PATH" || exit 1',
-		'    log_event "launched game pid=$game_pid"',
-		'}',
-		'',
-		'launch_bot() {',
-		'    is_running_state || exit 0',
-		'    [ -n "$BOT_WORKDIR" ] || return 0',
-		'    [ -n "$BOT_COMMAND" ] || [ -n "$BOT_EXE" ] || return 0',
-		'    cd "$BOT_WORKDIR" || return 0',
-		'    if [ -n "$BOT_COMMAND" ]; then',
-		'        if command -v setsid >/dev/null 2>&1; then',
-		'            setsid bash -lc "exec $BOT_COMMAND" >/dev/null 2>&1 &',
-		'        else',
-		'            bash -lc "exec $BOT_COMMAND" >/dev/null 2>&1 &',
-		'        fi',
-		'    else',
-		'        if command -v setsid >/dev/null 2>&1; then',
-		'            setsid bash -lc \'exec "$1" $2\' bot-launch "$BOT_EXE" "$BOT_ARGS" >/dev/null 2>&1 &',
-		'        else',
-		'            bash -lc \'exec "$1" $2\' bot-launch "$BOT_EXE" "$BOT_ARGS" >/dev/null 2>&1 &',
-		'        fi',
-		'    fi',
-		'    bot_pid="$!"',
-		'    printf "%s\n" "$bot_pid" > "$HOME_PATH/bot.pid"',
-		'    cd "$HOME_PATH" || exit 1',
-		'    log_event "launched bot pid=$bot_pid"',
-		'}',
-		'',
-		'# bash serverStart.sh stop  : record STOPPED, then stop the watchdog, bot and game (stopserver.sh).',
-		'# bash serverStart.sh start : record RUNNING, then start the watchdog (startserver.sh).',
-		'if [ "$1" = "stop" ] || [ "$1" = "start" ]; then',
-		'    exec 9>>"$HOME_PATH/status.lock"',
-		'    flock -w 30 9 || { log_event "busy: another start or stop is working on this server"; exit 1; }',
-		'    old_watchdog="$(read_number_file "$HOME_PATH/watchdog.pid")"',
-		'fi',
-		'if [ "$1" = "stop" ]; then',
-		'    publish_stopped_state',
-		'    [ -n "$old_watchdog" ] && [ "$old_watchdog" != "$$" ] && kill "$old_watchdog" >/dev/null 2>&1',
-		'    adopt_running_game',
-		'    cleanup_managed_processes',
-		'    screen -S "$SCREEN_ID" -X quit >/dev/null 2>&1',
-		'    rm -f "$HOME_PATH/watchdog.pid"',
-		'    log_event "stopped"',
-		'    exit 0',
-		'fi',
-		'if [ "$1" = "start" ]; then',
-		'    publish_running_state',
-		'    if pid_alive "$old_watchdog" && grep -q serverStart.sh "/proc/$old_watchdog/cmdline" 2>/dev/null; then',
-		'        log_event "already running (watchdog pid=$old_watchdog)"',
-		'        exit 0',
-		'    fi',
-		'    screen -S "$SCREEN_ID" -X quit >/dev/null 2>&1',
-		'    bash -c "$SCREEN_START_COMMAND" 9>&-',
-		'    log_event "started"',
-		'    exit 0',
-		'fi',
-		'',
-		'is_running_state || exit 0',
-		'',
-		'while is_running_state; do',
-		'    game_pid="$(read_number_file "$HOME_PATH/game.pid")"',
-		'    if ! pid_alive "$game_pid" && ! adopt_running_game; then',
-		'        previous_launch="$(read_number_file "$HOME_PATH/game.launch_ts")"',
-		'        now="$(date +%s)"',
-		'        if [ -n "$previous_launch" ] && [ "$previous_launch" -gt 0 ] && [ $((now - previous_launch)) -lt 120 ]; then',
-		'            log_event "game exited within 120 seconds; stopping managed lifecycle"',
-		'            publish_stopped_state',
-		'            cleanup_managed_processes',
-		'            exit 0',
-		'        fi',
-		'        if [ "$AUTORESTART_ENABLED" != "1" ] && [ -n "$previous_launch" ]; then',
-		'            log_event "game exited and autorestart is disabled; stopping managed lifecycle"',
-		'            publish_stopped_state',
-		'            cleanup_managed_processes',
-		'            exit 0',
-		'        fi',
-		'        rm -f "$HOME_PATH/game.pid"',
-		'        launch_game',
-		'    fi',
-		'',
-		'    load_bot_definition',
-		'    bot_pid="$(read_number_file "$HOME_PATH/bot.pid")"',
-		'    if [ -n "$BOT_WORKDIR" ] && { [ -n "$BOT_COMMAND" ] || [ -n "$BOT_EXE" ]; } && ! pid_alive "$bot_pid"; then',
-		'        rm -f "$HOME_PATH/bot.pid"',
-		'        launch_bot',
-		'    fi',
-		'',
-		'    sleep 30',
-		'done',
-		'',
-		'exit 0'
-	);
-	my $watchdog_script = join("\n", @watchdog_lines) . "\n";
-
-	if(defined $envVars && $envVars ne ""){
-		$watchdog_script =~ s/\ncd "\$HOME_PATH" \|\| exit 1\n/\n$envVars\ncd "\$HOME_PATH" || exit 1\n/;
-	}
-
-	print SERV_START_SCRIPT $watchdog_script;
-	close (SERV_START_SCRIPT);
-
-	chmod 0750, $server_start_bashfile;
-	my $readOnlyOwnerCmd = "chmod -Rf og-r " . $quoted_watchdog_path;
-	sudo_exec_without_decrypt($readOnlyOwnerCmd);
-
-	# startserver.sh and stopserver.sh: for an admin on the host. Run them as the game's user (or root).
-	foreach my $action ("start", "stop")
-	{
-		my $admin_script = "$home_path/${action}server.sh";
-		next unless(open(my $ADMIN_SCRIPT, '>', $admin_script));
-		print $ADMIN_SCRIPT "#!/bin/bash\n# $action this game server, like the panel button. It updates the status files.\nbash \"\$(dirname \"\$0\")/serverStart.sh\" $action\n";
-		close($ADMIN_SCRIPT);
-		chmod 0750, $admin_script;
-	}
-
-	return $screen_start_command;
-
-}
 
 sub handle_lock_command_line{
 	my ($command) = @_;
@@ -1830,31 +1516,6 @@ sub write_desired_state_without_decrypt
 	return 0;
 }
 
-# Read desired state safely. Any missing, duplicate, conflicting, or unreadable marker fails safe as stopped.
-sub read_desired_state_without_decrypt
-{
-	my ($home_path) = @_;
-	my ($running_file, $stopped_file) = desired_state_paths_without_decrypt($home_path);
-	return ("stopped", "invalid_home") if($running_file eq "" || $stopped_file eq "");
-	my $running_exists = -e $running_file ? 1 : 0;
-	my $stopped_exists = -e $stopped_file ? 1 : 0;
-	return ("stopped", "missing") if(!$running_exists && !$stopped_exists);
-	return ("stopped", "conflicting") if($running_exists && $stopped_exists);
-
-	my $state_file = $running_exists ? $running_file : $stopped_file;
-	my $STATE;
-	if(!open($STATE, '<', $state_file))
-	{
-		return ("stopped", "unreadable");
-	}
-	my $line = <$STATE>;
-	close($STATE);
-	return ("stopped", "invalid") unless(defined($line));
-	chomp($line);
-	my $expected_state = $running_exists ? "running" : "stopped";
-	return ("stopped", "invalid") unless($line =~ /^([0-9]+),(running|stopped)$/ && $2 eq $expected_state);
-	return ($expected_state, "ok");
-}
 
 # Remove lifecycle PID/timestamp metadata after verification has proven the home is inactive.
 sub clear_lifecycle_runtime_files_without_decrypt
@@ -1880,24 +1541,6 @@ sub get_pid_metadata_path
 	return Path::Class::File->new(SERVER_RUNTIME_DIR, "pid-$home_id.kv");
 }
 
-sub write_pid_metadata
-{
-	my ($home_id, $values) = @_;
-	return 0 unless(ref($values) eq 'HASH');
-	my $file = get_pid_metadata_path($home_id);
-	if(open(PIDMETA, '>', $file))
-	{
-		foreach my $key (sort keys %$values)
-		{
-			my $value = defined($values->{$key}) ? $values->{$key} : "";
-			$value =~ s/[\r\n]//g;
-			print PIDMETA "$key=$value\n";
-		}
-		close(PIDMETA);
-		return 1;
-	}
-	return 0;
-}
 
 sub read_pid_metadata
 {
@@ -2079,7 +1722,7 @@ sub normalized_path_is_at_or_under_without_decrypt
 	return index($candidate, "$root/") == 0 ? 1 : 0;
 }
 
-# Derive game_root as management_home/<validated game_key> and prove it stays inside management_home.
+# game_root is management_home/gamefiles (as on Windows). The XML game_key is still validated.
 sub resolve_game_root_without_decrypt
 {
 	my ($management_home, $game_key) = @_;
@@ -2087,7 +1730,7 @@ sub resolve_game_root_without_decrypt
 	return (0, "", "Management home is empty.") if($management_home eq "");
 	my ($valid_key, $key_error) = validate_game_key_without_decrypt($game_key);
 	return (0, "", $key_error) unless($valid_key);
-	my $game_root = normalize_agent_path_without_decrypt("$management_home/$game_key");
+	my $game_root = normalize_agent_path_without_decrypt("$management_home/gamefiles");
 	if(!normalized_path_is_at_or_under_without_decrypt($game_root, $management_home) || $game_root eq $management_home)
 	{
 		return (0, "", "Resolved game root escapes the management home.");
@@ -2411,47 +2054,6 @@ sub lifecycle_stop_evidence_without_decrypt
 	};
 }
 
-# Called from the per-second scheduler task, runs at most every 30 seconds: a home that is wanted RUNNING but has no live watchdog gets one again.
-# serverStart.sh start is the same as startserver.sh: the watchdog takes over a game that is still up on its
-# port, or launches it. A home wanted STOPPED is never touched. At most one revive per home per minute.
-my %reconcile_last_revive;
-my $reconcile_last_run = 0;
-sub reconcile_running_homes
-{
-	return if(time() - $reconcile_last_run < 30);
-	$reconcile_last_run = time();
-	return unless(opendir(my $FLAGS, GAME_STARTUP_DIR));
-	my @flags = grep { !/^\./ && !/^(?:status|pid)-/ } readdir($FLAGS);
-	closedir($FLAGS);
-	foreach my $flag (@flags)
-	{
-		next unless(open(my $FH, '<', Path::Class::File->new(GAME_STARTUP_DIR, $flag)));
-		my $line = <$FH>;
-		close($FH);
-		next unless(defined($line));
-		my ($home_id, $home_path) = split(',', $line, 3);
-		next unless(defined($home_path) && $home_id =~ /^\d+$/ && -d $home_path);
-		my ($desired_state) = read_desired_state_without_decrypt($home_path);
-		next unless($desired_state eq "running");
-		next unless(-r "$home_path/serverStart.sh");
-		my $watchdog_pid = "";
-		if(open(my $PIDFILE, '<', "$home_path/watchdog.pid"))
-		{
-			$watchdog_pid = <$PIDFILE>;
-			close($PIDFILE);
-			$watchdog_pid = "" unless(defined($watchdog_pid) && $watchdog_pid =~ /^\s*(\d+)\s*$/);
-			$watchdog_pid = $1 if($watchdog_pid ne "");
-		}
-		next if($watchdog_pid ne "" && is_pid_alive_without_decrypt($watchdog_pid) && index(proc_cmdline_without_decrypt($watchdog_pid), "serverStart.sh") >= 0);
-		my $now = time();
-		next if(defined($reconcile_last_revive{$home_id}) && $now - $reconcile_last_revive{$home_id} < 60);
-		$reconcile_last_revive{$home_id} = $now;
-		my $owner = SERVER_RUNNER_USER;
-		$owner = "gamehome" . $home_id if(defined LINUX_USER_PER_GAME_SERVER && LINUX_USER_PER_GAME_SERVER eq "1");
-		logger "HOME ID:$home_id is wanted RUNNING but its watchdog is not running; starting the watchdog again.";
-		sudo_exec_without_decrypt("bash '$home_path/serverStart.sh' start", $owner);
-	}
-}
 
 sub safe_port_owner_status_without_decrypt
 {
@@ -2682,119 +2284,212 @@ sub has_listening_port_named
 sub server_status_without_decrypt
 {
 	my ($home_id, $server_ip, $server_port, $query_port, $rcon_port, $startup_timeout, $state_hint) = @_;
-	$startup_timeout = STARTUP_VALIDATION_TIMEOUT unless(defined($startup_timeout) && $startup_timeout =~ /^[0-9]+$/ && $startup_timeout > 0);
-	$query_port = "" unless(defined($query_port) && $query_port =~ /^[0-9,;:\s\/a-zA-Z]+$/);
-	$rcon_port = "" unless(defined($rcon_port) && $rcon_port =~ /^[0-9,;:\s\/a-zA-Z]+$/);
-	$state_hint = "" unless(defined($state_hint));
+	return gm_status_reply($home_id);
+}
 
-	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
-	my $session_running = is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1 ? 1 : 0;
-	my $screen_pid = $session_running ? get_screen_pid_without_decrypt($home_id) : "";
-	my $pid_meta = read_pid_metadata($home_id);
-	my $game_pid = defined($pid_meta->{game_pid}) ? $pid_meta->{game_pid} : "";
-	my $linux_pid = $game_pid;
-	my $pid_running = 0;
-	$pid_running = 1 if($screen_pid ne "" && is_pid_alive_without_decrypt($screen_pid) == 1);
-	$pid_running = 1 if(!$pid_running && $game_pid ne "" && is_pid_alive_without_decrypt($game_pid) == 1);
-	my $process_running = ($session_running || $pid_running) ? 1 : 0;
-	my @expected_ports = build_expected_ports($server_port, $query_port, $rcon_port);
-	my ($listening_ports, $missing_ports) = PORT_VALIDATION_ENABLED ? validate_expected_ports($server_ip, @expected_ports) : ([], []);
-	my $expected_count = scalar(@expected_ports);
-	my $listening_count = scalar(@$listening_ports);
-	my $missing_count = scalar(@$missing_ports);
-	my $game_port_listening = has_listening_port_named($listening_ports, "game");
-	my $query_port_listening = has_listening_port_named($listening_ports, "query");
-	my $rcon_port_listening = has_listening_port_named($listening_ports, "rcon");
-	if(!PORT_VALIDATION_ENABLED)
-	{
-		$game_port_listening = is_port_listening_without_decrypt($server_ip, $server_port);
-		$query_port_listening = $query_port ne "" ? is_port_listening_without_decrypt($server_ip, $query_port) : 0;
-		$rcon_port_listening = $rcon_port ne "" ? is_port_listening_without_decrypt($server_ip, $rcon_port) : 0;
-	}
-	my $last_error = "";
-	my $status = "UNKNOWN";
-	my $status_state = "Unknown";
-	my $ready = 0;
+# ---- Game manager (shared with the Windows agent, see GameManager.pm) ----
 
-	if(!$process_running && ((!PORT_VALIDATION_ENABLED && $game_port_listening) || ($expected_count > 0 && $listening_count > 0)))
-	{
-		$status = "WARNING";
-		$status_state = "Warning";
-		$last_error = "Required port is listening but the managed process/session is not running.";
-	}
-	elsif($process_running)
-	{
-		if(!PORT_VALIDATION_ENABLED && $game_port_listening)
-		{
-			$status = "ONLINE";
-			$status_state = "Running";
-			$ready = 1;
-		}
-		elsif(PORT_VALIDATION_ENABLED && $expected_count > 0 && $missing_count == 0)
-		{
-			$status = "ONLINE";
-			$status_state = "Running";
-			$ready = 1;
-		}
-		elsif(PORT_VALIDATION_ENABLED && $expected_count > 0 && $listening_count > 0)
-		{
-			$status = "ONLINE";
-			$status_state = "Warning";
-			$ready = 1;
-			$last_error = "Process/session exists, but some expected ports are not listening.";
-		}
-		else
-		{
-			$status = "STARTING";
-			$status_state = "Starting";
-		}
-	}
-	else
-	{
-		$status = "OFFLINE";
-		$status_state = "Stopped";
-		clear_pid_metadata($home_id);
-	}
+# Runs a shell command as root, or as $user, with the agent's sudo password.
+# Returns ($stdout, '') or ($stdout, $reason) when the command failed.
+sub gm_run_as
+{
+	my ($cmd, $user) = @_;
+	$user = 'root' unless(defined($user) && $user ne '');
+	(my $q = $cmd) =~ s/'/'\\''/g;
+	my $wrapped = $user eq 'root' ? "bash -c '$q'" : "su -s /bin/bash -c '$q' $user";
+	(my $pw = defined($SUDOPASSWD) ? $SUDOPASSWD : '') =~ s/'/'\\''/g;
+	my ($out, $rc) = GameManagerLinux::qx_rc("echo '$pw' | sudo -kS -p '' $wrapped 2>/dev/null");
+	return ($out, $rc == 0 ? '' : "exit $rc");
+}
 
-	my $status_info = {
-		home_id => $home_id,
-		status => $status,
-		StatusState => $status_state,
-		status_state => $status_state,
-		ready => $ready,
-		ProcessRunning => $process_running,
-		process_running => $process_running,
-		session_running => $session_running,
-		pid_running => $pid_running,
-		game_port_listening => $game_port_listening ? 1 : 0,
-		query_port_listening => $query_port_listening ? 1 : 0,
-		rcon_port_listening => $rcon_port_listening ? 1 : 0,
-		PortValidationEnabled => PORT_VALIDATION_ENABLED ? 1 : 0,
-		StartupValidationTimeoutSeconds => $startup_timeout,
-		PortCheckIntervalSeconds => PORT_CHECK_INTERVAL_SECONDS,
-		ExpectedPorts => \@expected_ports,
-		expected_ports => \@expected_ports,
-		ListeningPorts => $listening_ports,
-		listening_ports => $listening_ports,
-		MissingPorts => $missing_ports,
-		missing_ports => $missing_ports,
-		CPUUsage => agent_cpu_usage_percent(),
-		MemoryUsage => agent_ram_usage_percent(),
-		pid => $game_pid ne "" ? $game_pid : $screen_pid,
-		screen_pid => $screen_pid,
-		windows_pid => "",
-		linux_pid => $linux_pid,
-		session_name => $screen_id,
-		ip => $server_ip,
-		port => $server_port,
-		query_port => $query_port,
-		rcon_port => $rcon_port,
-		game_port => $server_port,
-		last_error => $last_error,
-		query_info => ""
+# The Linux user that runs a server's game, and its group. With per-server users on, the user
+# gamehome<id> is created the first time it is needed (as before).
+sub gm_home_owner
+{
+	my ($home_id, $create) = @_;
+	my $owner = SERVER_RUNNER_USER;
+	my $group = SERVER_RUNNER_USER;
+	if(defined LINUX_USER_PER_GAME_SERVER && LINUX_USER_PER_GAME_SERVER eq "1")
+	{
+		$owner = "gamehome" . $home_id;
+		$group = `whoami`;
+		chomp $group;
+		my $userExists = `id -u $owner 2>/dev/null`;
+		if($create && not is_integer($userExists))
+		{
+			logger "User $owner currently doesn't exist... creating user...";
+			sudo_exec_without_decrypt("useradd -m $owner");
+			sudo_exec_without_decrypt("usermod -s /bin/bash $owner");
+			sudo_exec_without_decrypt("usermod -a -G \"$owner\" \"$group\"");
+		}
+	}
+	return ($owner, $group);
+}
+
+# The panel can put a server's management home anywhere, so the agent keeps an index:
+# homes/<id> holds the folder of server <id>. Written by Start and Stop.
+use constant GM_HOMES_DIR => Path::Class::Dir->new(AGENT_RUN_DIR, 'homes');
+our %GM_HOME_DIR;
+sub gm_remember_home
+{
+	my ($home_id, $home_path) = @_;
+	return unless(defined($home_id) && $home_id =~ /^\d+$/ && defined($home_path) && $home_path ne '');
+	$home_path =~ s{/+$}{};
+	mkdir GM_HOMES_DIR unless(-d GM_HOMES_DIR);
+	if(open(my $fh, '>', Path::Class::File->new(GM_HOMES_DIR, $home_id)))
+	{
+		print $fh "$home_path\n";
+		close($fh);
+	}
+	$GM_HOME_DIR{$home_id} = $home_path;
+}
+
+sub gm_home_dir
+{
+	my ($home_id) = @_;
+	return $GM_HOME_DIR{$home_id} if(defined($GM_HOME_DIR{$home_id}));
+	my $path = '';
+	if(open(my $fh, '<', Path::Class::File->new(GM_HOMES_DIR, $home_id)))
+	{
+		$path = <$fh> // '';
+		close($fh);
+		chomp $path;
+	}
+	# No entry yet: a folder that cannot exist, so the server reads as STOPPED.
+	$path = Path::Class::Dir->new(GM_HOMES_DIR, "missing-$home_id")->stringify if($path eq '');
+	return $GM_HOME_DIR{$home_id} = $path;
+}
+
+# Every server in the index, as (id => folder).
+sub gm_known_homes
+{
+	my %homes;
+	opendir(my $dh, GM_HOMES_DIR) or return %homes;
+	for my $id (grep { /^\d+$/ } readdir($dh))
+	{
+		delete $GM_HOME_DIR{$id};
+		$homes{$id} = gm_home_dir($id);
+	}
+	closedir($dh);
+	return %homes;
+}
+
+# Launch for GameManager: runs serverStart.sh (the game) or _alsoRun.sh (the bot) in screen as
+# the server's user. The screen title stays SCREEN_HOME_<id>, so the panel's console and log work.
+sub gm_launch
+{
+	my ($command, $workdir, $opt) = @_;
+	my $script = $opt ? $opt->{script} : undef;
+	return (0, 'launch failed: no script') unless(defined($script) && $script ne '');
+	(my $dir = $script) =~ s{/[^/]+$}{};
+	my %homes = gm_known_homes();
+	my ($home_id) = grep { $homes{$_} eq $dir } keys %homes;
+	return (0, "launch failed: $dir is not a known server folder") unless(defined($home_id));
+	my $bot = $script =~ m{/_alsoRun\.sh$} ? 1 : 0;
+	my ($owner) = gm_home_owner($home_id, 0);
+	return GameManagerLinux::launch_screen(
+		script => $script,
+		user => $owner,
+		screen_id => $bot ? create_screen_id("BOT", $home_id) : create_screen_id(SCREEN_TYPE_HOME, $home_id),
+		screenrc => SCREENRC_FILE,
+		run_dir => AGENT_RUN_DIR,
+	);
+}
+
+our %GM_WINDOW;     # epoch of the last start/stop per server
+sub gm {
+	our $GM;
+	return $GM if($GM);
+	GameManagerLinux::set_runner(\&gm_run_as);
+	GameManagerLinux::set_helper(Path::Class::File->new(AGENT_RUN_DIR, 'gm_proc_table.pl')->stringify);
+	$GM = GameManager->new(
+		state_dir       => GAME_STARTUP_DIR,
+		dir_for         => \&gm_home_dir,
+		agent_dir       => AGENT_RUN_DIR,
+		now             => sub { time() },
+		pid_alive       => \&GameManagerLinux::pid_alive,
+		pid_executable_matches => \&GameManagerLinux::pid_executable_matches,
+		port_listening  => \&GameManagerLinux::port_listening,
+		port_owner_pids => \&GameManagerLinux::port_owner_pids,
+		pid_path        => \&GameManagerLinux::pid_exe_path,
+		child_pids      => \&GameManagerLinux::child_pids,
+		kill_pid        => \&GameManagerLinux::kill_pid,
+		launch          => \&gm_launch,
+		log             => sub { logger($_[0]); },
+		startup_timeout => 300,   # 5 minutes from launch; a server's start_timeout overrides it
+		restart_limit   => 5,
+		restart_window  => 1800,
+		# Linux settings (the defaults are Windows).
+		script_ext      => '.sh',
+		write_script    => \&GameManagerLinux::write_server_script,
+		write_admin_script => \&GameManagerLinux::write_admin_script,
+		launcher_image  => 'screen',
+		shell_images    => ['screen', 'bash', 'sh', 'su', 'sudo', 'setsid'],
+		fold_case       => 0,
+	);
+	return $GM;
+}
+
+# The panel only reads the status file: one quick reply, no process or port checks here.
+sub gm_status_reply {
+	my ($home_id) = @_;
+	$home_id =~ s/[^0-9]//g;
+	my $st = gm()->read_state($home_id);
+	my $s  = $st->{state};
+	return {
+		status => GameManager::panel_status_for($s), state => $s,
+		ready => ($s eq 'RUNNING' && $st->{process_running} && $st->{port_listening} ? 1 : 0),
+		process_running => ($st->{process_running} ? 1 : 0),
+		session_running => ($st->{session_running} ? 1 : 0),
+		game_port_listening => ($st->{port_listening} ? 1 : 0),
+		query_port_listening => 0, rcon_port_listening => 0,
+		desired_state => $st->{desired}, desired => $st->{desired}, updated_at => ($st->{updated_at} || $st->{ts}),
+		reason => $st->{reason}, pid => $st->{pid}, last_error => $st->{reason},
+		ip => '', port => '', query_port => '', rcon_port => '', query_info => '',
 	};
-	record_server_state_transition($status_info);
-	return $status_info;
+}
+
+# Scheduler job, every 5 seconds: bring every known server in line with its wanted state.
+sub gm_monitor_all {
+	my %homes = gm_known_homes();
+	for my $id (sort { $a <=> $b } keys %homes)
+	{
+		next unless(-e "$homes{$id}/status");
+		GameManagerLinux::forget_process_table();
+		eval { gm()->tick($id); 1 } or logger("Monitor error for HOME ID:$id: $@");
+		eval { gm()->ensure_bot($id, GameManagerLinux::read_bot_config("$homes{$id}/_alsoRun.sh"), $homes{$id}); 1 } or logger("Bot monitor error for HOME ID:$id: $@");
+	}
+}
+
+sub set_desired
+{
+	chomp(@_);
+	return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my ($home_id, $desired) = decrypt_params(@_);
+	return gm()->set_desired($home_id, $desired);
+}
+
+# Environment variables and pre-start commands from the game config, and the CPU and priority
+# settings, for serverStart.sh. Written at Start, read by every launch (also automatic restarts).
+sub gm_write_prestart
+{
+	my ($home_id, $home_path, $game_root, $game_key, $screen_id, $preStart, $envVars, $prefix) = @_;
+	my @lines = ("# Written by the agent at Start: environment, launch prefix and pre-start commands.");
+	foreach my $line (split /[\r\n]+/, (defined $envVars ? $envVars : ""))
+	{
+		$line = replace_Env_Vars($screen_id, $home_id, $game_root, $line, $game_key);
+		push @lines, $line if($line ne "");
+	}
+	push @lines, "GSE_LAUNCH_PREFIX=" . GameManagerLinux::sh_quote($prefix);
+	foreach my $line (split /[\r\n]+/, (defined $preStart ? $preStart : ""))
+	{
+		$line = replace_Env_Vars($screen_id, $home_id, $game_root, $line, $game_key);
+		push @lines, $line if($line ne "");
+	}
+	open(my $fh, '>', "$home_path/gse_prestart.sh") or return 0;
+	print $fh join("\n", @lines) . "\n";
+	close($fh);
+	return 1;
 }
 
 # Universal startup function
@@ -2812,10 +2507,12 @@ sub universal_start_without_decrypt
 		$home_id, $home_path, $server_exe, $run_dir,
 		$startup_cmd, $server_port, $server_ip, $cpu, $nice, $preStart, $envVars, $game_key, $console_log
 	   ) = @_;
+	logger "Start request received for HOME ID:$home_id.";
+	$home_path =~ s{/+$}{} if(defined($home_path));
 
-	if (!-e $home_path)
+	if (!defined($home_path) || !-d $home_path)
 	{
-		logger "Can't find server's install path [ $home_path ].";
+		logger "Can't find server management home [ " . ($home_path // '') . " ].";
 		return -10;
 	}
 	my ($game_root_ok, $game_root, $game_root_error) = resolve_game_root_without_decrypt($home_path, $game_key);
@@ -2826,229 +2523,80 @@ sub universal_start_without_decrypt
 	}
 	if(!-d $game_root)
 	{
-		logger "Can't find game payload root [ $game_root ] beneath management home [ $home_path ].";
+		logger "Can't find the game folder [ $game_root ] in management home [ $home_path ].";
 		return -10;
 	}
-
-	my $owner = SERVER_RUNNER_USER;
-	my $group = SERVER_RUNNER_USER;
-	my $agentGroup = `whoami`;
-
-	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
-
-	chomp $agentGroup;
-
-	if(defined LINUX_USER_PER_GAME_SERVER && LINUX_USER_PER_GAME_SERVER eq "1"){
-		$owner = "gamehome" . $home_id;
-		$group = `whoami`;
-		chomp $group;
-
-		# Create new user if doesn't exist
-		my $userExists = `id -u $owner`;
-		if(not is_integer($userExists)){
-			logger "User $owner currently doesn't exist... creating user...";
-
-			sudo_exec_without_decrypt("useradd -m $owner");
-			sudo_exec_without_decrypt("usermod -s /bin/bash $owner");
-			sudo_exec_without_decrypt("usermod -a -G \"$owner\" \"$group\"");
-		}
-	}
-
-	my $preflight = hard_stop_server_without_decrypt($home_id, $server_ip, $server_port, $home_path, remove_startup => 0, preflight => 1);
-	if(!$preflight->{success})
-	{
-		logger "Start preflight failed for $server_ip:$server_port: " . ($preflight->{message} || $preflight->{status});
-		return -15;
-	}
-
-	# Fix perms on the GSE agent user's homedir so other users can access owned files within this dir.
-	my $fixHomeDirCommand = 'chmod -R ug+rwx $( getent passwd "' . $agentGroup . '" | cut -d: -f6 )';
-	sudo_exec_without_decrypt($fixHomeDirCommand);
-
-	$fixHomeDirCommand = 'find "$( getent passwd "' . $agentGroup . '" | cut -d: -f6 )" -type d -print0 | xargs -0 chmod o+x';
-	sudo_exec_without_decrypt($fixHomeDirCommand);
-
-	# Some game require that we are in the directory where the binary is.
 	my ($payload_path_ok, $game_binary_dir, $payload_path_error) = resolve_game_payload_path_without_decrypt($home_path, $game_key, $run_dir);
 	if(!$payload_path_ok)
 	{
 		logger "Invalid game executable directory for HOME ID:$home_id at $home_path: $payload_path_error";
 		return -17;
 	}
-	if ( !-d $game_binary_dir || !chdir $game_binary_dir)
+	if(!-d $game_binary_dir)
 	{
-		logger "Could not change to server binary directory $game_binary_dir.";
+		logger "Could not find server binary directory $game_binary_dir.";
 		return -12;
 	}
 
-	# Temporarily unlock the server executable
-	secure_path_without_decrypt('chattr-i', $server_exe);
+	my ($owner, $group) = gm_home_owner($home_id, 1);
+	my $agentGroup = `whoami`;
+	chomp $agentGroup;
+	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
 
-	# Set ownership on the game home
+	# Fix perms on the GSE agent user's homedir so other users can access owned files within this dir.
+	sudo_exec_without_decrypt('chmod -R ug+rwx $( getent passwd "' . $agentGroup . '" | cut -d: -f6 )');
+	sudo_exec_without_decrypt('find "$( getent passwd "' . $agentGroup . '" | cut -d: -f6 )" -type d -print0 | xargs -0 chmod o+x');
+
+	# Make the server executable runnable, owned by the server's user and locked (as before).
+	my $exe_path = "$game_binary_dir/$server_exe";
+	secure_path_without_decrypt('chattr-i', $exe_path);
 	set_path_ownership($owner, $group, $home_path, 1);
-
-	if (!-x $server_exe)
+	if (-e $exe_path && !-x $exe_path && !chmod(0775, $exe_path))
 	{
-		if (!chmod 0775, $server_exe)
-		{
-			logger "The $server_exe file is not executable.";
-			return -13;
-		}
+		logger "The $server_exe file is not executable.";
+		return -13;
 	}
+	secure_path_without_decrypt('chattr+i', $exe_path);
 
-	if(defined $preStart && $preStart ne ""){
-		# Get it in the format that the startup file can use
-		$preStart = multiline_to_startup_comma_format($preStart);
-	}else{
-		$preStart = "";
-	}
-
-	if(defined $envVars && $envVars ne ""){
-		# Replace variables in the envvars if they exist
-		my @prestartenvvars = split /[\r\n]+/, $envVars;
-		my $envVarStr = "";
-		foreach my $line (@prestartenvvars) {
-			$line = replace_Env_Vars("", $home_id, $game_root, $line, $game_key);
-			if($line ne ""){
-				logger "Configuring environment variable: $line";
-				$envVarStr .= "$line\n";
-			}
-		}
-
-		if(defined $envVarStr && $envVarStr ne ""){
-			$envVars = $envVarStr;
-		}
-
-		# Get it in the format that the startup file can use
-		$envVars = multiline_to_startup_comma_format($envVars);
-	}else{
-		$envVars = "";
-	}
-
-	# Secure file
-	secure_path_without_decrypt('chattr+i', $server_exe);
-
-	# Create startup file for the server.
-	my $startup_file =
-	  Path::Class::File->new(GAME_STARTUP_DIR, "$server_ip-$server_port");
-	if (open(STARTUP, '>', $startup_file))
-	{
-		print STARTUP
-		  "$home_id,$home_path,$server_exe,$run_dir,$startup_cmd,$server_port,$server_ip,$cpu,$nice,$preStart,$envVars,$game_key,$console_log";
-		logger "Created startup flag for $server_ip-$server_port";
-		close(STARTUP);
-	}
-	else
-	{
-		logger "Cannot create file in " . $startup_file . " : $!";
-	}
-
-	if(defined $preStart && $preStart ne ""){
-		# Get it in the format that the startup file can use
-		$preStart = startup_comma_format_to_multiline($preStart);
-		my @prestart_lines = split /[\r\n]+/, $preStart;
-		my $prestart_str = "";
-		foreach my $line (@prestart_lines) {
-			$line = replace_Env_Vars("", $home_id, $game_root, $line, $game_key);
-			$prestart_str .= "$line\n" if($line ne "");
-		}
-		$preStart = $prestart_str if($prestart_str ne "");
-	}else{
-		$preStart = "";
-	}
-
-	if(defined $envVars && $envVars ne ""){
-		# Get it in the format that the startup file can use
-		$envVars = startup_comma_format_to_multiline($envVars);
-	}else{
-		$envVars = "";
-	}
-
-	# Create the startup string.
-	my $file_extension = substr $server_exe, -4;
-	my $cli_bin;
-	my $command;
-	my $run_before_start;
-	prepare_server_content_runtime_without_decrypt($home_path);
-
-	# Replace any GSP compatibility variables found in the command line
+	# The game command. The executable comes first (GameManager matches the running game by it);
+	# wine, the CPU list and the priority go in GSE_LAUNCH_PREFIX in gse_prestart.sh.
 	$startup_cmd = replace_Env_Vars($screen_id, $home_id, $game_root, $startup_cmd, $game_key);
-
-	if($file_extension eq ".exe" or $file_extension eq ".bat")
+	my $file_extension = lc(substr($server_exe, -4));
+	my @prefix;
+	push @prefix, "taskset -c $cpu" if(defined($cpu) && $cpu ne '' && $cpu ne 'NA');
+	push @prefix, "nice -n $nice" if(defined($nice) && $nice =~ /^\d+$/ && $nice > 0);
+	logger "Priority $nice needs root; the game starts at normal priority." if(defined($nice) && $nice =~ /^-\d+$/);
+	my $command;
+	if($file_extension eq ".jar")
 	{
-		$command = "wine $server_exe $startup_cmd";
-
-		if ($cpu ne 'NA')
-		{
-			$command = "taskset -c $cpu wine $server_exe $startup_cmd";
-		}
-
-		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir, $server_port);
-		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir, $server_port);
-		}
-	}
-	elsif($file_extension eq ".jar")
-	{
-		$command = "$startup_cmd";
-
-		if ($cpu ne 'NA')
-		{
-			$command = "taskset -c $cpu $startup_cmd";
-		}
-
-		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir, $server_port);
-		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir, $server_port);
-		}
+		$command = $startup_cmd;
 	}
 	else
 	{
-		$command = "./$server_exe $startup_cmd";
-
-		if ($cpu ne 'NA')
-		{
-			$command = "taskset -c $cpu ./$server_exe $startup_cmd";
-		}
-
-		if(preference_enabled('autorestart_server', 'autorestart_server', '1')){
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, undef, undef, $home_path, $game_binary_dir, $server_port);
-		}else{
-			$cli_bin = create_screen_cmd_loop($screen_id, $command, $envVars, 1, undef, $home_path, $game_binary_dir, $server_port);
-		}
+		push @prefix, "wine" if($file_extension eq ".exe" || $file_extension eq ".bat");
+		$command = "\"$exe_path\" $startup_cmd";
 	}
-
-	my $log_file = Path::Class::File->new(SCREEN_LOGS_DIR, "screenlog.$screen_id");
-	backup_home_log( $home_id, $log_file, $game_root . "/" . $console_log );
-
-	logger
-	  "Startup command [ $cli_bin ] will be executed in dir $game_binary_dir.";
-
-	# Fix permissions one last time after backup_home_log created folders or files.
-	set_path_ownership($owner, $group, $home_path, 1);
-
-	# Run before start script
-	$run_before_start = run_before_start_commands($home_id, $home_path, $preStart, $owner);
-
-	if(!write_desired_state_without_decrypt($home_path, "running"))
+	if(!gm_write_prestart($home_id, $home_path, $game_root, $game_key, $screen_id, $preStart, $envVars, join(' ', @prefix)))
 	{
-		logger "Unable to write running desired state in $home_path.";
+		logger "Unable to write gse_prestart.sh in $home_path: $!";
 		return -16;
 	}
-	sudo_exec_without_decrypt($cli_bin, $owner);
+	prepare_server_content_runtime_without_decrypt($home_path);
+	backup_home_log($home_id, Path::Class::File->new(SCREEN_LOGS_DIR, "screenlog.$screen_id"), $game_root . "/" . (defined($console_log) ? $console_log : ""));
+	set_path_ownership($owner, $group, $home_path, 1);
 
-	sleep(1);
-	my @started_pids = get_home_pids($home_id);
-	my $game_pid = @started_pids > 0 ? $started_pids[0] : "";
-	my $screen_pid = get_screen_pid_without_decrypt($home_id);
-	write_pid_metadata($home_id, {
-		screen_pid => $screen_pid,
-		game_pid => $game_pid,
-		ip => $server_ip,
-		port => $server_port
-	});
+	# Startup flag: the resource statistics use it to know which executables are servers.
+	my $startup_file = Path::Class::File->new(GAME_STARTUP_DIR, "$server_ip-$server_port");
+	if (open(my $STARTUP, '>', $startup_file))
+	{
+		print $STARTUP "$home_id,$home_path,$server_exe,$run_dir,,$server_port,$server_ip,$cpu,$nice,,,$game_key,$console_log";
+		close($STARTUP);
+	}
+
+	gm_remember_home($home_id, $home_path);
+	$GM_WINDOW{$home_id} = time();
+	my $gm_result = gm()->start($home_id, command => $command, workdir => $game_binary_dir, port => $server_port);
+	logger "Start for HOME ID:$home_id returned " . ($gm_result->{ok} ? "started" : "not started: $gm_result->{reason}") . ".";
 	queue_agent_event("server_process_started", "info", {
 		home_id => $home_id,
 		game_home_path => $home_path,
@@ -3056,19 +2604,13 @@ sub universal_start_without_decrypt
 		ip => $server_ip,
 		game_port => $server_port,
 		screen_session_name => $screen_id,
-		tracked_pid => $game_pid,
-		detected_process_pid => $game_pid,
+		tracked_pid => $gm_result->{pid} || "",
 		actual_process_state => "starting",
-		actual_session_state => $screen_pid ne "" ? "present" : "unknown",
 		actual_port_state => "pending_validation",
-		message => "Server process start command completed; status polling will confirm port readiness."
-	});
-
-	renice_process_without_decrypt($home_id, $nice);
-
+		message => "Server launched; the game monitor confirms the port within 5 minutes."
+	}) if($gm_result->{ok});
 	chdir AGENT_RUN_DIR;
-
-	return 1;
+	return $gm_result->{ok} ? 1 : -14;
 }
 
 # This is used to change the priority of process
@@ -3436,95 +2978,35 @@ sub stop_server_without_decrypt
 {
 	my ($home_id, $server_ip, $server_port, $control_protocol,
 		$control_password, $control_type, $home_path) = @_;
-
-	my $stop = hard_stop_server_without_decrypt($home_id, $server_ip, $server_port, $home_path, remove_startup => 1);
-	if($stop->{success})
+	logger "Stop request received for HOME ID:$home_id.";
+	gm_remember_home($home_id, $home_path) if(defined($home_path) && -d $home_path);
+	$GM_WINDOW{$home_id} = time();
+	my $stop = gm()->stop($home_id);
+	unlink(Path::Class::File->new(GAME_STARTUP_DIR, "$server_ip-$server_port")) if(defined($server_ip) && defined($server_port));
+	if($stop->{ok})
 	{
 		queue_agent_event("server_stop_confirmed", "info", {
 			home_id => $home_id,
 			ip => $server_ip,
 			game_port => $server_port,
-			tracked_pid => join(',', @{$stop->{killed_pids}}),
 			actual_process_state => "stopped",
-			actual_session_state => "stopped",
 			actual_port_state => "closed",
-			message => $stop->{message}
+			message => "Server stopped and its port is free."
 		});
 		return 0;
 	}
-	logger "Server $server_ip:$server_port could not be fully stopped: " . ($stop->{message} || $stop->{status});
+	logger "Server $server_ip:$server_port could not be fully stopped: " . ($stop->{reason} || "port $server_port still in use");
 	queue_agent_event("server_unresponsive", "error", {
 		home_id => $home_id,
 		ip => $server_ip,
 		game_port => $server_port,
-		tracked_pid => join(',', @{$stop->{remaining_pids}}),
-		actual_process_state => @{$stop->{remaining_pids}} ? "running" : "stopped",
-		actual_session_state => "unknown",
-		actual_port_state => @{$stop->{port_pids}} ? "listening" : "closed",
-		message => $stop->{message} || "Server remained active after hard stop."
+		actual_process_state => "unknown",
+		actual_port_state => $stop->{port_open} ? "listening" : "closed",
+		message => $stop->{reason} || "Server remained active after stop."
 	});
 	return 1;
 }
 
-sub verify_runtime_stop_complete_without_decrypt
-{
-	my ($home_id, $server_ip, $server_port, $home_path) = @_;
-	my $pid_meta = read_pid_metadata($home_id);
-	for(my $i = 0; $i < 30; $i++)
-	{
-		my $evidence = lifecycle_stop_evidence_without_decrypt($home_id, $server_ip, $server_port, $home_path);
-		if(!$evidence->{session_running} && !$evidence->{process_running} && !$evidence->{port_listening})
-		{
-			clear_lifecycle_runtime_files_without_decrypt($home_id, $home_path);
-			queue_agent_event("server_stop_confirmed", "info", {
-				home_id => $home_id,
-				ip => $server_ip,
-				game_port => $server_port,
-				tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
-				actual_process_state => "stopped",
-				actual_session_state => "stopped",
-				actual_port_state => "closed",
-				message => "Server stop confirmed after process, session, and port validation."
-			});
-			return 0;
-		}
-		sleep 2;
-	}
-	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
-	my $as_user = find_user_by_screen_id($screen_id);
-	sudo_exec_without_decrypt('screen -S '.$screen_id.' -X quit', $as_user);
-	sleep 2;
-	sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
-	force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user, $home_path);
-	my $evidence = lifecycle_stop_evidence_without_decrypt($home_id, $server_ip, $server_port, $home_path);
-	if($evidence->{session_running} || $evidence->{process_running} || $evidence->{port_listening})
-	{
-		logger "Server $server_ip:$server_port is still running or listening after stop escalation.";
-		queue_agent_event("server_unresponsive", "error", {
-			home_id => $home_id,
-			ip => $server_ip,
-			game_port => $server_port,
-			tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
-			actual_process_state => $evidence->{process_running} ? "running" : "stopped",
-			actual_session_state => $evidence->{session_running} ? "running" : "stopped",
-			actual_port_state => $evidence->{port_listening} ? "listening" : "closed",
-			message => "Server remained active after stop escalation."
-		});
-		return 1;
-	}
-	clear_lifecycle_runtime_files_without_decrypt($home_id, $home_path);
-	queue_agent_event("server_stop_confirmed", "info", {
-		home_id => $home_id,
-		ip => $server_ip,
-		game_port => $server_port,
-		tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
-		actual_process_state => "stopped",
-		actual_session_state => "stopped",
-		actual_port_state => "closed",
-		message => "Server stop confirmed after escalation."
-	});
-	return 0;
-}
 
 sub force_stop_server
 {
@@ -3543,6 +3025,9 @@ sub force_stop_server_without_decrypt
 	}
 
 	logger "Force stop requested for HOME ID:$home_id $server_ip:$server_port.";
+	# STOPPED is recorded first, or the game monitor would start the game again.
+	gm_remember_home($home_id, $home_path) if(defined($home_path) && -d $home_path);
+	gm()->stop($home_id);
 	my $hard_stop = hard_stop_server_without_decrypt($home_id, $server_ip, $server_port, $home_path, remove_startup => 1, force => 1);
 	my $evidence = lifecycle_stop_evidence_without_decrypt($home_id, $server_ip, $server_port, $home_path);
 	my $success = $hard_stop->{success} ? 1 : 0;
@@ -4088,43 +3573,7 @@ sub lock_additional_files_logic{
 	return "";
 }
 
-sub run_before_start_commands
-{
-	#return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
-	my ($server_id, $homedir, $beforestartcmd, $pathowner) = @_;
 
-	if ($homedir ne "" && $server_id ne ""){
-		# Run any prestart scripts
-		if (defined $beforestartcmd && $beforestartcmd ne "")
-		{
-			logger "Running pre-start XML commands before starting server ID $server_id with a home directory of $homedir.";
-			my @prestartcmdlines = split /[\r\n]+/, $beforestartcmd;
-			my $prestartcmdfile = $homedir."/".'prestart_ogp.sh';
-			open  FILE, '>', $prestartcmdfile;
-			print FILE "#!/bin/bash" . "\n";
-			print FILE "cd $homedir\n";
-			foreach my $line (@prestartcmdlines) {
-				print FILE "$line\n";
-			}
-			print FILE "rm -f $prestartcmdfile\n";
-			close FILE;
-			chmod 0755, $prestartcmdfile;
-			sudo_exec_without_decrypt("bash $prestartcmdfile", $pathowner);
-		}
-	}else{
-		return -2;
-	}
-
-	return 1;
-}
-
-sub multiline_to_startup_comma_format{
-	my ($multiLineVar) = @_;
-	$multiLineVar =~ s/,//g; # commas are invalid anyways in bash
-	$multiLineVar =~ s/[\r]+//g;
-	$multiLineVar =~ s/[\n]+/{NEWLINE_TOKEN}/g;
-	return $multiLineVar;
-}
 
 sub multiline_to_bash_commands{
 	my ($multiLineVar) = @_;
@@ -5721,21 +5170,7 @@ sub restart_server_without_decrypt
 										$server_port, $control_protocol,
 										$control_password, $control_type, $home_path) == 0)
 	{
-		logger "Waiting 60 seconds before starting the server again.";
-		sleep 60;
-		if (verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port, $home_path) != 0)
-		{
-			logger "Restart cancelled: previous instance is still active after stop wait window.";
-			queue_agent_event($restart_failed_event, "error", {
-				home_id => $home_id,
-				ip => $server_ip,
-				game_port => $server_port,
-				restart_reason => $restart_reason,
-				correlation_id => $correlation_id,
-				message => "Restart cancelled because previous instance was still active."
-			}) if($report_restart_events);
-			return -2;
-		}
+		# Stop has confirmed the port is free; GameManager frees it again before launch. No wait.
 		if (universal_start_without_decrypt($home_id, $home_path, $server_exe, $run_dir,
 											$cmd, $server_port, $server_ip, $cpu, $nice, $preStart, $envVars, $game_key, $console_log) == 1)
 		{
@@ -6983,11 +6418,11 @@ fi
 case "\$DEST" in /*) ;; *) fail "Destination must be absolute: \$DEST" ;; esac
 mkdir -p "\$DEST" || fail "Cannot create destination: \$DEST"
 ARCHIVE="\$BACKUP_BASE/${component}_\$(date +%Y%m%d_%H%M%S).tar.gz"
-tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./*.pid' -czf "\$ARCHIVE" -C "\$DEST" . >> "\$LOG" 2>&1 || fail "Backup failed"
+tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./homes' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./*.pid' -czf "\$ARCHIVE" -C "\$DEST" . >> "\$LOG" 2>&1 || fail "Backup failed"
 if command -v rsync >/dev/null 2>&1; then
-  rsync -a --exclude='Cfg/' --exclude='ServerFiles/' --exclude='Schedule/' --exclude='logs/' --exclude='screenlogs/' --exclude='steamcmd/' --exclude='startups/' --exclude='tmp/' --exclude='shared/' --exclude='component_backups/' --exclude='*.pid' "\$SRC"/ "\$DEST"/ >> "\$LOG" 2>&1 || fail "rsync copy failed"
+  rsync -a --exclude='Cfg/' --exclude='ServerFiles/' --exclude='Schedule/' --exclude='logs/' --exclude='screenlogs/' --exclude='steamcmd/' --exclude='startups/' --exclude='homes/' --exclude='tmp/' --exclude='shared/' --exclude='component_backups/' --exclude='*.pid' "\$SRC"/ "\$DEST"/ >> "\$LOG" 2>&1 || fail "rsync copy failed"
 else
-  (cd "\$SRC" && tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./*.pid' -cf - .) | (cd "\$DEST" && tar -xf -) >> "\$LOG" 2>&1 || fail "tar copy failed"
+  (cd "\$SRC" && tar --exclude='./Cfg' --exclude='./ServerFiles' --exclude='./Schedule' --exclude='./logs' --exclude='./screenlogs' --exclude='./steamcmd' --exclude='./startups' --exclude='./homes' --exclude='./tmp' --exclude='./shared' --exclude='./component_backups' --exclude='./*.pid' -cf - .) | (cd "\$DEST" && tar -xf -) >> "\$LOG" 2>&1 || fail "tar copy failed"
 fi
 if [ "$component" = "linux_agent" ]; then
   for file in steamcmd/steamcmd.sh steamcmd/linux32/steamcmd steamcmd/linux32/steamerrorreporter steamcmd/linux32/libstdc++.so.6 steamcmd/linux32/crashhandler.so; do
@@ -7311,6 +6746,7 @@ sub scheduler_add_task
 											   } );
 
 		$cron->add_entry( "* * * * * *", \&scheduler_read_tasks );
+		$cron->add_entry( "* * * * * */5", \&gm_monitor_all );   # re-register the game monitor job on every new scheduler object
 		# Run scheduler
 		$cron->run( {detach=>1, pid_file=>SCHED_PID} );
 		return 1;
@@ -7353,6 +6789,7 @@ sub scheduler_del_task
 											   } );
 
 		$cron->add_entry( "* * * * * *", \&scheduler_read_tasks );
+		$cron->add_entry( "* * * * * */5", \&gm_monitor_all );   # re-register the game monitor job on every new scheduler object
 		# Run scheduler
 		$cron->run( {detach=>1, pid_file=>SCHED_PID} );
 		return 1;
@@ -7400,6 +6837,7 @@ sub scheduler_edit_task
 											   } );
 
 		$cron->add_entry( "* * * * * *", \&scheduler_read_tasks );
+		$cron->add_entry( "* * * * * */5", \&gm_monitor_all );   # re-register the game monitor job on every new scheduler object
 		# Run scheduler
 		$cron->run( {detach=>1, pid_file=>SCHED_PID} );
 		return 1;
@@ -7411,7 +6849,6 @@ sub scheduler_edit_task
 sub scheduler_read_tasks
 {
 	# The scheduler rebuilds its timetable every second, which starves seconds-based jobs, so ride this one.
-	eval { reconcile_running_homes(); 1 } or logger "reconcile_running_homes failed: $@";
 	if( open(TASKS, '<', SCHED_TASKS) )
 	{
 		# Store built-in scheduler tasks before cleaning timetable
