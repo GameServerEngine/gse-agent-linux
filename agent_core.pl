@@ -3007,65 +3007,6 @@ sub stop_server_without_decrypt
 	return 1;
 }
 
-sub verify_runtime_stop_complete_without_decrypt
-{
-	my ($home_id, $server_ip, $server_port, $home_path) = @_;
-	my $pid_meta = read_pid_metadata($home_id);
-	for(my $i = 0; $i < 30; $i++)
-	{
-		my $evidence = lifecycle_stop_evidence_without_decrypt($home_id, $server_ip, $server_port, $home_path);
-		if(!$evidence->{session_running} && !$evidence->{process_running} && !$evidence->{port_listening})
-		{
-			clear_lifecycle_runtime_files_without_decrypt($home_id, $home_path);
-			queue_agent_event("server_stop_confirmed", "info", {
-				home_id => $home_id,
-				ip => $server_ip,
-				game_port => $server_port,
-				tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
-				actual_process_state => "stopped",
-				actual_session_state => "stopped",
-				actual_port_state => "closed",
-				message => "Server stop confirmed after process, session, and port validation."
-			});
-			return 0;
-		}
-		sleep 2;
-	}
-	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
-	my $as_user = find_user_by_screen_id($screen_id);
-	sudo_exec_without_decrypt('screen -S '.$screen_id.' -X quit', $as_user);
-	sleep 2;
-	sudo_exec_without_decrypt('screen -wipe > /dev/null 2>&1', $as_user);
-	force_kill_tracked_and_port_without_decrypt($home_id, $server_port, $as_user, $home_path);
-	my $evidence = lifecycle_stop_evidence_without_decrypt($home_id, $server_ip, $server_port, $home_path);
-	if($evidence->{session_running} || $evidence->{process_running} || $evidence->{port_listening})
-	{
-		logger "Server $server_ip:$server_port is still running or listening after stop escalation.";
-		queue_agent_event("server_unresponsive", "error", {
-			home_id => $home_id,
-			ip => $server_ip,
-			game_port => $server_port,
-			tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
-			actual_process_state => $evidence->{process_running} ? "running" : "stopped",
-			actual_session_state => $evidence->{session_running} ? "running" : "stopped",
-			actual_port_state => $evidence->{port_listening} ? "listening" : "closed",
-			message => "Server remained active after stop escalation."
-		});
-		return 1;
-	}
-	clear_lifecycle_runtime_files_without_decrypt($home_id, $home_path);
-	queue_agent_event("server_stop_confirmed", "info", {
-		home_id => $home_id,
-		ip => $server_ip,
-		game_port => $server_port,
-		tracked_pid => $pid_meta->{game_pid} || $pid_meta->{screen_pid} || "",
-		actual_process_state => "stopped",
-		actual_session_state => "stopped",
-		actual_port_state => "closed",
-		message => "Server stop confirmed after escalation."
-	});
-	return 0;
-}
 
 sub force_stop_server
 {
@@ -5229,21 +5170,7 @@ sub restart_server_without_decrypt
 										$server_port, $control_protocol,
 										$control_password, $control_type, $home_path) == 0)
 	{
-		logger "Waiting 60 seconds before starting the server again.";
-		sleep 60;
-		if (verify_runtime_stop_complete_without_decrypt($home_id, $server_ip, $server_port, $home_path) != 0)
-		{
-			logger "Restart cancelled: previous instance is still active after stop wait window.";
-			queue_agent_event($restart_failed_event, "error", {
-				home_id => $home_id,
-				ip => $server_ip,
-				game_port => $server_port,
-				restart_reason => $restart_reason,
-				correlation_id => $correlation_id,
-				message => "Restart cancelled because previous instance was still active."
-			}) if($report_restart_events);
-			return -2;
-		}
+		# Stop has confirmed the port is free; GameManager frees it again before launch. No wait.
 		if (universal_start_without_decrypt($home_id, $home_path, $server_exe, $run_dir,
 											$cmd, $server_port, $server_ip, $cpu, $nice, $preStart, $envVars, $game_key, $console_log) == 1)
 		{
