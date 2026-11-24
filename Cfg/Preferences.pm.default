@@ -9,4 +9,8 @@
 	PortValidationEnabled => '1',
 	StartupValidationTimeoutSeconds => '180',
 	PortCheckIntervalSeconds => '5',
+	container_runtime_enabled => '0',
+	container_runtime => 'docker',
+	container_runtime_docker_binary => 'docker',
+	container_data_root => '',
 );
