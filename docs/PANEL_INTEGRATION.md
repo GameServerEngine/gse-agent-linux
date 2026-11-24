@@ -99,3 +99,22 @@ The updater preserves host/customer data and local config:
 Restart-time updates use the same SteamCMD preservation rule as install and repair: restore missing bundled bootstrap files only, preserve existing `steamcmd/` state, and never delete `steamapps/` or downloaded Workshop/content data.
 
 If the updated agent does not listen on its RPC port before the timeout, the updater stops the failed instance, restores the backup, starts the previous agent, and records `rolled_back` or `failed` in `agent_core_update_state.json`.
+
+## Container Capability RPCs
+
+The Linux agent has the same opt-in container boundary as the Windows agent
+(`gse.container.v1`, shared module `GSE/Container/Runtime.pm`):
+
+- `container_capabilities`
+- `container_create`, `container_inspect`, `container_start`, `container_stop`,
+  `container_restart`, `container_delete`
+
+These are separate from the game-process RPCs. Existing Panel records keep
+calling `universal_start`, `stop_server`, `restart_server` and `server_status`.
+`container_capabilities` answers while the runtime is off, so the Panel can see
+that support is installed. The other methods refuse until
+`container_runtime_enabled => '1'` is set in `Cfg/Preferences.pm` (the default is
+`'0'`). Only the Docker adapter exists. The Panel has no wrapper for these RPCs yet.
+
+`agent_version` and `agent_resource_snapshot` also return `protocol_version` (1),
+which the Panel's Update Agent action checks before it sends a release.

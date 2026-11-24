@@ -41,6 +41,7 @@ use File::Glob qw(bsd_glob GLOB_NOSORT);
 use File::Path qw(mkpath);
 use Archive::Extract;	 # Used to handle archived files.
 use File::Find;
+use File::Spec;
 use Schedule::Cron; # Used for scheduling tasks
 use JSON::PP;
 use POSIX ();
@@ -48,6 +49,7 @@ use Digest::SHA qw(hmac_sha256_hex);
 use Sys::Hostname qw(hostname);
 use GameManager;        # start, stop and monitor rules, shared with the Windows agent
 use GameManagerLinux;   # Linux process and port checks for GameManager
+use GSE::Container::Runtime; # opt-in Docker container boundary, shared with the Windows agent
 
 # Compression tools
 use IO::Compress::Bzip2 qw(bzip2 $Bzip2Error); # Used to compress files to bz2.
@@ -65,6 +67,7 @@ use constant AGENT_LOG_FILE => $Cfg::Config{logfile};
 use constant AGENT_PORT	 => $Cfg::Config{listen_port};
 use constant AGENT_CODE_VERSION => 'gsp-linux-agent-0.7.1';
 use constant AGENT_VERSION  => AGENT_CODE_VERSION;
+use constant AGENT_PROTOCOL_VERSION => 1;
 use constant WEB_ADMIN_API_KEY  => $Cfg::Config{web_admin_api_key};
 use constant WEB_API_URL => $Cfg::Config{web_api_url};
 use constant STEAM_DL_LIMIT => $Cfg::Config{steam_dl_limit};
@@ -84,6 +87,14 @@ use constant STARTUP_VALIDATION_TIMEOUT =>
 use constant PORT_CHECK_INTERVAL_SECONDS =>
   defined($Cfg::Preferences{PortCheckIntervalSeconds}) ? $Cfg::Preferences{PortCheckIntervalSeconds} : 5;
 use constant LINUX_USER_PER_GAME_SERVER  => $Cfg::Preferences{linux_user_per_game_server};
+use constant CONTAINER_RUNTIME_ENABLED =>
+  defined($Cfg::Preferences{container_runtime_enabled}) && $Cfg::Preferences{container_runtime_enabled} eq "1" ? 1 : 0;
+use constant CONTAINER_RUNTIME =>
+  defined($Cfg::Preferences{container_runtime}) && $Cfg::Preferences{container_runtime} ne "" ? $Cfg::Preferences{container_runtime} : "docker";
+use constant CONTAINER_RUNTIME_DOCKER_BINARY =>
+  defined($Cfg::Preferences{container_runtime_docker_binary}) && $Cfg::Preferences{container_runtime_docker_binary} ne "" ? $Cfg::Preferences{container_runtime_docker_binary} : "docker";
+use constant CONTAINER_DATA_ROOT =>
+  defined($Cfg::Preferences{container_data_root}) && $Cfg::Preferences{container_data_root} ne "" ? $Cfg::Preferences{container_data_root} : File::Spec->catdir(AGENT_RUN_DIR, "containers");
 use constant AGENT_PID_FILE =>
   Path::Class::File->new(AGENT_RUN_DIR, 'agent_core.pid');
 use constant AGENT_RSYNC_GENERIC_LOG =>
@@ -930,8 +941,7 @@ if(-e Path::Class::File->new(FD_DIR, 'Settings.pm'))
 				$SIG{CHLD} = 'DEFAULT';
 				delete $ENV{$_} for grep { /^RESTIC_/ } keys %ENV;
 				$ENV{$_} = $env->{$_} for keys %$env;
-				exec { $bin } @$argv;
-				POSIX::_exit(127);
+				exec { $bin } @$argv or POSIX::_exit(127);
 			}
 
 			waitpid($worker, 0);
@@ -1032,6 +1042,13 @@ my $d = Frontier::Daemon::GSP::Forking->new(
 					 force_stop_server				=> \&force_stop_server,
 					 universal_start			  	=> \&universal_start,
 					 set_desired					=> \&set_desired,
+				 container_capabilities			=> \&container_capabilities,
+				 container_create				=> \&container_create,
+				 container_inspect				=> \&container_inspect,
+				 container_start				=> \&container_start,
+				 container_stop					=> \&container_stop,
+				 container_restart				=> \&container_restart,
+				 container_delete				=> \&container_delete,
 				 renice_process					=> \&renice_process,
 				 cpu_count						=> \&cpu_count,
 				 rfile_exists				 	=> \&rfile_exists,
@@ -1363,6 +1380,236 @@ sub decrypt_params
 		push(@params, $param);
 	}
 	return @params;
+}
+
+# Reports the explicit container boundary without changing legacy lifecycle routing.
+sub container_capabilities
+{
+	return container_bad_encryption_response_without_decrypt()
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	return container_capabilities_without_decrypt();
+}
+
+# Handles explicit container create requests through the opt-in runtime boundary.
+sub container_create
+{
+	return container_lifecycle_rpc("create", @_);
+}
+
+# Handles explicit container inspect requests through the opt-in runtime boundary.
+sub container_inspect
+{
+	return container_lifecycle_rpc("inspect", @_);
+}
+
+# Handles explicit container start requests through the opt-in runtime boundary.
+sub container_start
+{
+	return container_lifecycle_rpc("start", @_);
+}
+
+# Handles explicit container stop requests through the opt-in runtime boundary.
+sub container_stop
+{
+	return container_lifecycle_rpc("stop", @_);
+}
+
+# Handles explicit container restart requests through the opt-in runtime boundary.
+sub container_restart
+{
+	return container_lifecycle_rpc("restart", @_);
+}
+
+# Handles explicit container delete requests through the opt-in runtime boundary.
+sub container_delete
+{
+	return container_lifecycle_rpc("delete", @_);
+}
+
+# Builds the capability document the Panel can read before enabling container mode.
+sub container_capabilities_without_decrypt
+{
+	return {
+		contract => GSE::Container::Models::CONTRACT_VERSION(),
+		success => JSON::PP::true(),
+		status => "ok",
+		message => "Container runtime boundary is installed. Legacy game-process RPCs remain unchanged.",
+		configuration => {
+			enabled => CONTAINER_RUNTIME_ENABLED ? JSON::PP::true() : JSON::PP::false(),
+			runtime => CONTAINER_RUNTIME,
+			docker_binary => CONTAINER_RUNTIME_DOCKER_BINARY,
+			data_root => CONTAINER_DATA_ROOT
+		},
+		operations => [
+			"container_capabilities",
+			"container_create",
+			"container_inspect",
+			"container_start",
+			"container_stop",
+			"container_restart",
+			"container_delete"
+		],
+		features => {
+			stable_names => JSON::PP::true(),
+			ownership_labels => JSON::PP::true(),
+			cpu_limits => JSON::PP::true(),
+			hard_memory_limits => JSON::PP::true(),
+			optional_burst_memory => JSON::PP::true(),
+			persistent_volume_mapping => JSON::PP::true(),
+			assigned_tcp_udp_port_publishing => JSON::PP::true(),
+			structured_results => JSON::PP::true(),
+			idempotent_lifecycle_where_observable => JSON::PP::true(),
+			logs => JSON::PP::false(),
+			console_exec => JSON::PP::false(),
+			scoped_files => JSON::PP::false(),
+			backup_restore_points => JSON::PP::false(),
+			health_monitoring => JSON::PP::false()
+		},
+		proof_gates => {
+			live_docker_poc => JSON::PP::false(),
+			steamcmd_outbound_networking => JSON::PP::false(),
+			resource_enforcement => JSON::PP::false(),
+			port_allocation_enforcement => JSON::PP::false(),
+			storage_quota_enforcement => JSON::PP::false()
+		},
+		compatibility => {
+			default_for_legacy_game_records => JSON::PP::false(),
+			legacy_lifecycle_rpcs_unchanged => JSON::PP::true(),
+			requires_explicit_panel_container_mode => JSON::PP::true()
+		}
+	};
+}
+
+# Runs one explicit container RPC after decrypting and validating the request envelope.
+sub container_lifecycle_rpc
+{
+	my ($operation, @encrypted_params) = @_;
+	return container_bad_encryption_response_without_decrypt()
+		unless(decrypt_param(pop(@encrypted_params)) eq "Encryption checking OK");
+	return container_failure_without_decrypt(
+		status => "unsupported",
+		code => "container_runtime_disabled",
+		category => "unsupported",
+		message => "Container runtime is disabled on this agent. Set container_runtime_enabled=1 only after the host passes the Docker proof-of-concept gates.",
+		retryable => 0
+	) unless(CONTAINER_RUNTIME_ENABLED);
+	return container_failure_without_decrypt(
+		status => "unsupported",
+		code => "unsupported_runtime",
+		category => "unsupported",
+		message => "Only the docker container runtime adapter is available in this migration slice.",
+		retryable => 0
+	) unless(CONTAINER_RUNTIME eq "docker");
+
+	my ($payload) = decrypt_params(@encrypted_params);
+	my ($request, $request_error) = container_decode_request_without_decrypt($payload);
+	return $request_error unless($request);
+	return container_failure_without_decrypt(
+		status => "validation_failed",
+		code => "invalid_contract",
+		category => "validation",
+		message => "Container request contract must be " . GSE::Container::Models::CONTRACT_VERSION() . ".",
+		retryable => 0
+	) unless(defined($request->{contract}) && $request->{contract} eq GSE::Container::Models::CONTRACT_VERSION());
+
+	my $runtime = container_runtime_adapter_without_decrypt();
+	my $result;
+	my $ok = eval {
+		if($operation eq "create")
+		{
+			$result = $runtime->create($request);
+		}
+		elsif($operation eq "inspect")
+		{
+			$result = $runtime->inspect($request);
+		}
+		elsif($operation eq "start")
+		{
+			$result = $runtime->start($request);
+		}
+		elsif($operation eq "stop")
+		{
+			$result = $runtime->stop($request);
+		}
+		elsif($operation eq "restart")
+		{
+			$result = $runtime->restart($request);
+		}
+		elsif($operation eq "delete")
+		{
+			$result = $runtime->delete($request);
+		}
+		else
+		{
+			$result = container_failure_without_decrypt(
+				status => "unsupported",
+				code => "unsupported_operation",
+				category => "unsupported",
+				message => "Unsupported container operation.",
+				retryable => 0
+			);
+		}
+		1;
+	};
+	return $result if($ok);
+	logger "Container $operation RPC failed unexpectedly: $@";
+	return container_failure_without_decrypt(
+		status => "failed",
+		code => "internal_error",
+		category => "internal",
+		message => "Container operation failed inside the agent boundary.",
+		retryable => 0
+	);
+}
+
+# Creates the currently supported Docker-backed container runtime adapter.
+sub container_runtime_adapter_without_decrypt
+{
+	return GSE::Container::DockerRuntime->new(
+		docker_binary => CONTAINER_RUNTIME_DOCKER_BINARY,
+		data_root => CONTAINER_DATA_ROOT
+	);
+}
+
+# Decodes the JSON request body carried by the encrypted XML-RPC compatibility wrapper.
+sub container_decode_request_without_decrypt
+{
+	my ($payload) = @_;
+	return (undef, container_failure_without_decrypt(
+		status => "validation_failed",
+		code => "invalid_contract",
+		category => "validation",
+		message => "Container request payload must be a JSON object.",
+		retryable => 0
+	)) unless(defined($payload) && $payload ne "");
+	my $request = eval { JSON::PP->new->decode($payload) };
+	return (undef, container_failure_without_decrypt(
+		status => "validation_failed",
+		code => "invalid_contract",
+		category => "validation",
+		message => "Container request payload is not valid JSON.",
+		retryable => 0
+	)) if($@ || ref($request) ne "HASH");
+	return ($request, undef);
+}
+
+# Builds a structured container failure for transport-level and integration errors.
+sub container_failure_without_decrypt
+{
+	my (%args) = @_;
+	return GSE::Container::Result->failure(%args);
+}
+
+# Returns the standard bad-encryption response for container RPCs.
+sub container_bad_encryption_response_without_decrypt
+{
+	return container_failure_without_decrypt(
+		status => "bad_encryption",
+		code => "bad_encryption",
+		category => "authorization",
+		message => "Bad Encryption Key",
+		retryable => 0
+	);
 }
 
 sub check_steam_cmd_client
@@ -6073,7 +6320,7 @@ sub agent_version
 		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
 	my $os = `uname -sr 2>/dev/null`;
 	chomp($os);
-	return component_update_response(success => 1, status => 'ok', agent_version => AGENT_VERSION, os => $os, install_path => AGENT_RUN_DIR);
+	return component_update_response(success => 1, status => 'ok', agent_version => AGENT_VERSION, protocol_version => AGENT_PROTOCOL_VERSION, os => $os, install_path => AGENT_RUN_DIR);
 }
 
 sub agent_resource_snapshot
@@ -6090,6 +6337,7 @@ sub agent_resource_snapshot
 		message => 'Resource snapshot collected.',
 		os => $os,
 		agent_version => AGENT_VERSION,
+		protocol_version => AGENT_PROTOCOL_VERSION,
 		install_path => AGENT_RUN_DIR,
 		cpu_percent => agent_cpu_usage_percent(),
 		ram_percent => agent_ram_usage_percent(),
