@@ -40,6 +40,15 @@ is_deeply([GameManagerLinux::parse_ss_owners($ss, 2796)], [], 'a shorter port nu
 is(GameManagerLinux::parse_ss_listening($ss, 12679), 1, 'TCP listener found');
 is(GameManagerLinux::parse_ss_listening($ss, 1), 0, 'nothing on another port');
 
+{
+	# The agent's RPC processes ignore child signals, so Perl's $? reads -1 there.
+	local $SIG{CHLD} = 'IGNORE';
+	my ($o, $rc) = GameManagerLinux::qx_rc('echo hi; false');
+	is_deeply([$o, $rc], ["hi\n", 1], 'exit code read with child signals ignored');
+	($o, $rc) = GameManagerLinux::qx_rc('printf x');
+	is_deeply([$o, $rc], ['x', 0], 'output without a final newline keeps its exit code');
+}
+
 # ---- shared GameManager with the Linux settings ----
 is(GameManager::_path_inside('/home/A/952/x', '/home/a/952', 0), 0, 'Linux: folder names keep their case');
 is(GameManager::_path_inside('C:/A/952/x', 'c:/a/952', 1), 1, 'Windows: folder names ignore case');

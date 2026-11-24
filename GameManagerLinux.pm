@@ -21,6 +21,15 @@ sub run_as {
 	return $RUNNER->($command, $user // 'root');
 }
 
+# Runs a shell command and returns ($stdout, $exit_code). The code is printed by the command
+# itself: inside the agent's RPC processes child signals are ignored, so Perl's $? reads -1.
+sub qx_rc {
+	my ($cmd) = @_;
+	my $out = `$cmd; printf '\\nGSE_RC=%s\\n' "\$?"`;
+	return (undef, -1) unless defined $out && $out =~ s/\nGSE_RC=(\d+)\n\z//;
+	return ($out, $1);
+}
+
 # Single-quoted shell word.
 sub sh_quote {
 	my ($text) = @_;
@@ -213,8 +222,8 @@ sub port_owner_pids {
 sub port_listening {
 	my ($port) = @_;
 	return 0 unless $port && $port =~ /^\d+$/;
-	my $out = `ss -Htuln 2>/dev/null`;
-	return undef if $? != 0;
+	my ($out, $rc) = qx_rc('ss -Htuln 2>/dev/null');
+	return undef if $rc != 0;
 	return parse_ss_listening($out, $port);
 }
 
@@ -236,8 +245,8 @@ sub executable_exists {
 	my ($path) = @_;
 	return 0 unless defined $path && length $path;
 	return -e $path ? 1 : 0 if $path =~ m{^/};
-	system('command -v ' . sh_quote($path) . ' >/dev/null 2>&1');
-	return $? == 0 ? 1 : 0;
+	my (undef, $rc) = qx_rc('command -v ' . sh_quote($path) . ' >/dev/null 2>&1');
+	return $rc == 0 ? 1 : 0;
 }
 
 # Starts a script inside a detached screen session, as the server's user, from the agent folder

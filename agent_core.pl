@@ -2298,8 +2298,8 @@ sub gm_run_as
 	(my $q = $cmd) =~ s/'/'\\''/g;
 	my $wrapped = $user eq 'root' ? "bash -c '$q'" : "su -s /bin/bash -c '$q' $user";
 	(my $pw = defined($SUDOPASSWD) ? $SUDOPASSWD : '') =~ s/'/'\\''/g;
-	my $out = qx(echo '$pw' | sudo -kS -p '' $wrapped 2>/dev/null);
-	return ($out, $? == 0 ? '' : 'exit ' . ($? >> 8));
+	my ($out, $rc) = GameManagerLinux::qx_rc("echo '$pw' | sudo -kS -p '' $wrapped 2>/dev/null");
+	return ($out, $rc == 0 ? '' : "exit $rc");
 }
 
 # The Linux user that runs a server's game, and its group. With per-server users on, the user
