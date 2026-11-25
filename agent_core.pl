@@ -4155,6 +4155,10 @@ sub steam_cmd_without_decrypt
 	{
 		print FILE "\@sSteamCmdForcePlatformType windows\n";
 	}
+	else
+	{
+		print FILE "\@sSteamCmdForcePlatformType linux\n";
+	}
 
 	# Handle requested SteamCMD architecture
 	if(defined $arch_bits && $arch_bits ne ""){
@@ -4167,7 +4171,7 @@ sub steam_cmd_without_decrypt
 
 	print FILE "force_install_dir \"$home_path\"\n";
 
-	if($guard ne '')
+	if($guard ne '' && $user ne '' && $user ne 'anonymous')
 	{
 		print FILE "set_steam_guard_code $guard\n";
 	}
