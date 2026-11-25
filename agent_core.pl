@@ -1072,6 +1072,7 @@ my $d = Frontier::Daemon::GSP::Forking->new(
 				 uncompress_file			  	=> \&uncompress_file,
 				 discover_ips					=> \&discover_ips,
 				 mon_stats						=> \&mon_stats,
+				 status_sample						=> \&status_sample,
 				 agent_resource_snapshot			=> \&agent_resource_snapshot,
 				 agent_version					=> \&agent_version,
 				 exec						 	=> \&exec,
@@ -4611,6 +4612,178 @@ sub discover_ips
 	}
 	logger "Found IPs: @ips";
 	return join(",", @ips);
+}
+
+# ---------------------------------------------------------------------------
+# status_sample: one reading for the panel's status history (modules/status_history/README.md).
+# Machine totals are cumulative counters: the panel works out rates and percentages from the change
+# between samples. Per-process CPU is measured here over a one-second window and is a share of
+# the whole machine (all cores), so it is comparable across hosts.
+# ---------------------------------------------------------------------------
+sub status_read_cpu_totals
+{
+	my ($total, $idle, $cores) = (0, 0, 0);
+	open(my $fh, '<', '/proc/stat') or return (0, 0, 0);
+	while (my $line = <$fh>)
+	{
+		if ($line =~ /^cpu\s+(.*)$/)
+		{
+			my @f = split /\s+/, $1;
+			my $last = $#f < 7 ? $#f : 7;
+			foreach my $i (0 .. $last) { $total += $f[$i] || 0; }
+			$idle = ($f[3] || 0) + ($f[4] || 0);
+		}
+		elsif ($line =~ /^cpu\d+\s/)
+		{
+			$cores++;
+		}
+	}
+	close($fh);
+	return ($total, $idle, $cores);
+}
+
+sub status_read_proc_ticks
+{
+	my (%ticks, %name);
+	opendir(my $dh, '/proc') or return (\%ticks, \%name);
+	foreach my $pid (grep { /^\d+$/ } readdir($dh))
+	{
+		open(my $fh, '<', "/proc/$pid/stat") or next;
+		my $line = <$fh>;
+		close($fh);
+		next unless (defined $line && $line =~ /^\d+ \((.*)\)/);
+		my $comm = $1;
+		my $rest = substr($line, rindex($line, ')') + 2);
+		my @f = split /\s+/, $rest;
+		# Fields after the closing bracket start at field 3 of stat, so utime (14) is index 11 and stime (15) is index 12.
+		$ticks{$pid} = ($f[11] || 0) + ($f[12] || 0);
+		$name{$pid}  = $comm;
+	}
+	closedir($dh);
+	return (\%ticks, \%name);
+}
+
+sub status_read_proc_rss
+{
+	my %rss;
+	opendir(my $dh, '/proc') or return \%rss;
+	foreach my $pid (grep { /^\d+$/ } readdir($dh))
+	{
+		open(my $fh, '<', "/proc/$pid/status") or next;
+		while (my $line = <$fh>)
+		{
+			if ($line =~ /^VmRSS:\s+(\d+)\s+kB/) { $rss{$pid} = $1 * 1024; last; }
+		}
+		close($fh);
+	}
+	closedir($dh);
+	return \%rss;
+}
+
+sub status_top_five
+{
+	my ($hash, $name, $scale) = @_;
+	my @rows = sort { $b->[1] <=> $a->[1] } grep { $_->[1] > 0 } map { [$_, $hash->{$_}] } keys %$hash;
+	my @out;
+	foreach my $row (@rows[0 .. ($#rows < 4 ? $#rows : 4)])
+	{
+		last unless defined $row;
+		my $pid = $row->[0];
+		my $label = $name->{$pid} // '?';
+		$label =~ s/[|\r\n]//g;
+		push @out, sprintf("%d|%s|%s", $pid, substr($label, 0, 60), $scale ? sprintf("%.2f", $row->[1] * $scale) : $row->[1]);
+	}
+	return @out;
+}
+
+sub status_sample
+{
+	return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my ($status_sample) = decrypt_params(@_);
+	if (!defined $status_sample || $status_sample ne "status_sample")
+	{
+		logger("Invalid parameter '" . ($status_sample // '') . "' given for status_sample function.");
+		return -1;
+	}
+
+	require Time::HiRes;
+	my ($total1, $idle1, $cores) = status_read_cpu_totals();
+	my ($ticks1, $name1) = status_read_proc_ticks();
+	Time::HiRes::usleep(1000000);
+	my ($total2, $idle2, $cores2) = status_read_cpu_totals();
+	my ($ticks2, $name2) = status_read_proc_ticks();
+	my $window = $total2 - $total1;
+
+	# Per-process CPU: share of the whole machine over the window.
+	my %cpu_delta;
+	if ($window > 0)
+	{
+		foreach my $pid (keys %$ticks2)
+		{
+			next unless exists $ticks1->{$pid};
+			my $d = $ticks2->{$pid} - $ticks1->{$pid};
+			$cpu_delta{$pid} = $d if $d > 0;
+		}
+	}
+	my @top_cpu = status_top_five(\%cpu_delta, $name2, $window > 0 ? 100 / $window : 0);
+	my @top_ram = status_top_five(status_read_proc_rss(), $name2, 0);
+
+	my $uptime = 0;
+	if (open(my $fh, '<', '/proc/uptime')) { my $l = <$fh>; close($fh); $uptime = int(($l // '0') =~ /^(\d+)/ ? $1 : 0); }
+	my $load1 = 0;
+	if (open(my $fh, '<', '/proc/loadavg')) { my $l = <$fh>; close($fh); $load1 = ($l // '0') =~ /^(\S+)/ ? $1 : 0; }
+
+	my ($rx, $tx) = (0, 0);
+	if (open(my $fh, '<', '/proc/net/dev'))
+	{
+		while (my $line = <$fh>)
+		{
+			next unless ($line =~ /^\s*([^:]+):\s*(.*)$/);
+			my ($if, $rest) = ($1, $2);
+			next if $if eq 'lo';
+			my @f = split /\s+/, $rest;
+			$rx += $f[0] || 0;
+			$tx += $f[8] || 0;
+		}
+		close($fh);
+	}
+
+	my %mem;
+	if (open(my $fh, '<', '/proc/meminfo'))
+	{
+		while (my $line = <$fh>) { $mem{$1} = $2 if ($line =~ /^(\w+):\s+(\d+)\s+kB/); }
+		close($fh);
+	}
+	my $mem_total = ($mem{MemTotal} || 0) * 1024;
+	my $mem_avail = defined $mem{MemAvailable}
+		? $mem{MemAvailable} * 1024
+		: (($mem{MemFree} || 0) + ($mem{Buffers} || 0) + ($mem{Cached} || 0)) * 1024;
+	my $mem_used = $mem_total - $mem_avail;
+	$mem_used = 0 if $mem_used < 0;
+
+	my ($disk_total, $disk_used) = (0, 0);
+	my @df = `df -P -B1 / 2>/dev/null`;
+	if (@df >= 2)
+	{
+		my @f = split /\s+/, $df[1];
+		($disk_total, $disk_used) = ($f[1] || 0, $f[2] || 0);
+	}
+
+	my $out = "1;\n";
+	$out .= "cores=" . ($cores2 || $cores) . "\n";
+	$out .= "uptime=$uptime\n";
+	$out .= "load1=$load1\n";
+	$out .= "cpu_total=$total2\n";
+	$out .= "cpu_idle=$idle2\n";
+	$out .= "net_rx=$rx\n";
+	$out .= "net_tx=$tx\n";
+	$out .= "mem_total=$mem_total\n";
+	$out .= "mem_used=$mem_used\n";
+	$out .= "disk_total=$disk_total\n";
+	$out .= "disk_used=$disk_used\n";
+	for my $i (1 .. scalar(@top_cpu)) { $out .= "proc_cpu.$i=$top_cpu[$i - 1]\n"; }
+	for my $i (1 .. scalar(@top_ram)) { $out .= "proc_ram.$i=$top_ram[$i - 1]\n"; }
+	return $out;
 }
 
 ### Return -1 In case of invalid param
