@@ -64,7 +64,7 @@ jobs:
               fi
               echo "Bumping $BASE to $NEW ($KIND change)"
               echo "$NEW" > VERSION
-              sed -i "s/gse-linux-agent-$CUR'/gsp-linux-agent-$NEW'/" agent_core.pl
+              sed -i "s/gse-linux-agent-$CUR'/gse-linux-agent-$NEW'/" agent_core.pl
               git config user.name 'github-actions[bot]'
               git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
               git add -A
