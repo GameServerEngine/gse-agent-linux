@@ -3,6 +3,8 @@
 Each fixed issue gets an entry under the version that shipped it: a one-line title, then the cause and the fix in plain language, written so a customer can follow it.
 
 ## Unreleased
+- **Linux version numbers match Windows:** the Linux agent restarts its numbering at 1.5.3, the same as the Windows agent. Linux agents numbered 0.x are old and should be updated.
+- **Steam installs on Linux:** SteamCMD is told to download the Linux build, and a Steam Guard code is sent only for a real Steam account. Anonymous installs such as Counter-Strike: Source (AppID 232330) no longer fail with "Missing configuration".
 - **Docker container RPCs, as on Windows:** the opt-in `container_*` RPCs and `GSE/Container/Runtime.pm` (the same file as the Windows agent) are now in the Linux agent. They are off unless `container_runtime_enabled` is `1`, and they do not change how normal game servers run.
 - **Container commands report their real result:** Docker commands run by the container RPCs were always reported as failed (exit code 72057594037927935), because the agent ignores child exits and so lost each command's exit code. The command runner now reads the real exit code. Fixed in the shared file, so the Windows agent gets it too.
 - **Protocol version:** `agent_version` and `agent_resource_snapshot` now return `protocol_version`, like the Windows agent, so the panel can check it before an update.
