@@ -33,7 +33,7 @@ jobs:
           set -euo pipefail
           CUR=$(tr -d '[:space:]' < VERSION)
           if [ -z "$CUR" ]; then echo 'VERSION is empty' >&2; exit 1; fi
-          if ! grep -qF "gsp-linux-agent-$CUR'" agent_core.pl; then echo "AGENT_CODE_VERSION does not match VERSION ($CUR)" >&2; exit 1; fi
+          if ! grep -qF "gse-linux-agent-$CUR'" agent_core.pl; then echo "AGENT_CODE_VERSION does not match VERSION ($CUR)" >&2; exit 1; fi
           NEW="$CUR"
           if [ "$BRANCH" = "testing" ]; then
             LAST=$(git tag -l 'testing-*' | sed 's/^testing-//' | grep -E '^[0-9]+([.][0-9]+)*$' | sort -V | tail -1 || true)
@@ -64,7 +64,7 @@ jobs:
               fi
               echo "Bumping $BASE to $NEW ($KIND change)"
               echo "$NEW" > VERSION
-              sed -i "s/gsp-linux-agent-$CUR'/gsp-linux-agent-$NEW'/" agent_core.pl
+              sed -i "s/gse-linux-agent-$CUR'/gsp-linux-agent-$NEW'/" agent_core.pl
               git config user.name 'github-actions[bot]'
               git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
               git add -A
