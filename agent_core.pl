@@ -44,6 +44,7 @@ use File::Find;
 use File::Spec;
 use Schedule::Cron; # Used for scheduling tasks
 use JSON::PP;
+use IO::Socket::INET;
 use POSIX ();
 use Digest::SHA qw(hmac_sha256_hex);
 use Sys::Hostname qw(hostname);
@@ -95,6 +96,13 @@ use constant CONTAINER_RUNTIME_DOCKER_BINARY =>
   defined($Cfg::Preferences{container_runtime_docker_binary}) && $Cfg::Preferences{container_runtime_docker_binary} ne "" ? $Cfg::Preferences{container_runtime_docker_binary} : "docker";
 use constant CONTAINER_DATA_ROOT =>
   defined($Cfg::Preferences{container_data_root}) && $Cfg::Preferences{container_data_root} ne "" ? $Cfg::Preferences{container_data_root} : File::Spec->catdir(AGENT_RUN_DIR, "containers");
+# Images containers may use, as reference prefixes (e.g. "eclipse-temurin:21-jre"). Empty means none.
+use constant CONTAINER_ALLOWED_IMAGES =>
+  defined($Cfg::Preferences{container_allowed_images}) ? $Cfg::Preferences{container_allowed_images} : "";
+use constant CONTAINER_NETWORK =>
+  defined($Cfg::Preferences{container_network}) && $Cfg::Preferences{container_network} =~ /\A[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z/ ? $Cfg::Preferences{container_network} : "gse-games";
+use constant CONTAINER_GAME_MOUNT => "/game";
+use constant CONTAINER_CONTROL_MOUNT => "/run/gse";
 use constant AGENT_PID_FILE =>
   Path::Class::File->new(AGENT_RUN_DIR, 'agent_core.pid');
 use constant AGENT_RSYNC_GENERIC_LOG =>
@@ -1051,6 +1059,12 @@ my $d = Frontier::Daemon::GSP::Forking->new(
 				 container_stop					=> \&container_stop,
 				 container_restart				=> \&container_restart,
 				 container_delete				=> \&container_delete,
+				 container_game_start			=> \&container_game_start,
+				 container_game_stop			=> \&container_game_stop,
+				 container_game_status			=> \&container_game_status,
+				 container_game_command			=> \&container_game_command,
+				 container_game_remove			=> \&container_game_remove,
+				 container_game_logs			=> \&container_game_logs,
 				 renice_process					=> \&renice_process,
 				 cpu_count						=> \&cpu_count,
 				 rfile_exists				 	=> \&rfile_exists,
@@ -1441,7 +1455,9 @@ sub container_capabilities_without_decrypt
 			enabled => CONTAINER_RUNTIME_ENABLED ? JSON::PP::true() : JSON::PP::false(),
 			runtime => CONTAINER_RUNTIME,
 			docker_binary => CONTAINER_RUNTIME_DOCKER_BINARY,
-			data_root => CONTAINER_DATA_ROOT
+			data_root => CONTAINER_DATA_ROOT,
+			network => CONTAINER_NETWORK,
+			approved_images => [ grep { $_ ne "" } split(/[\s,]+/, CONTAINER_ALLOWED_IMAGES) ]
 		},
 		operations => [
 			"container_capabilities",
@@ -1450,7 +1466,13 @@ sub container_capabilities_without_decrypt
 			"container_start",
 			"container_stop",
 			"container_restart",
-			"container_delete"
+			"container_delete",
+			"container_game_start",
+			"container_game_stop",
+			"container_game_status",
+			"container_game_command",
+			"container_game_remove",
+			"container_game_logs"
 		],
 		features => {
 			stable_names => JSON::PP::true(),
@@ -1462,11 +1484,17 @@ sub container_capabilities_without_decrypt
 			assigned_tcp_udp_port_publishing => JSON::PP::true(),
 			structured_results => JSON::PP::true(),
 			idempotent_lifecycle_where_observable => JSON::PP::true(),
-			logs => JSON::PP::false(),
+			logs => JSON::PP::true(),
 			console_exec => JSON::PP::false(),
+			console_input => JSON::PP::true(),
+			game_folder_bind_mount => JSON::PP::true(),
+			non_root_user => JSON::PP::true(),
+			dropped_capabilities => JSON::PP::true(),
+			pid_limits => JSON::PP::true(),
+			storage_quota => JSON::PP::false(),
 			scoped_files => JSON::PP::false(),
 			backup_restore_points => JSON::PP::false(),
-			health_monitoring => JSON::PP::false()
+			health_monitoring => JSON::PP::true()
 		},
 		proof_gates => {
 			live_docker_poc => JSON::PP::false(),
@@ -1613,6 +1641,492 @@ sub container_bad_encryption_response_without_decrypt
 		message => "Bad Encryption Key",
 		retryable => 0
 	);
+}
+
+# ---- Docker game execution backend ----
+# A GSE game server that runs in a container keeps its normal management home and gamefiles
+# folder. The agent works out every host path itself from the home path the Panel already
+# sends for native starts; the Panel only chooses the image, limits and ports.
+#   gamefiles            -> /game      (read-write, the customer's files)
+#   containers/homes/<id> -> /run/gse  (read-only, launch.sh and console.in written by the agent)
+
+# Returns a JSON text reply for the game container RPCs.
+sub container_game_reply
+{
+	my ($result) = @_;
+	return JSON::PP->new->canonical->allow_blessed->convert_blessed->encode($result);
+}
+
+sub container_game_failure
+{
+	my (%args) = @_;
+	$args{status} ||= "failed";
+	$args{retryable} ||= 0;
+	return container_game_reply(container_failure_without_decrypt(%args));
+}
+
+# Common checks for every game container RPC: runtime enabled, Docker adapter, JSON request
+# with the v1 contract and a target whose home_id matches the one the call is about.
+sub container_game_request_without_decrypt
+{
+	my ($runtime_json, $home_id) = @_;
+	return (undef, container_game_failure(
+		status => "unsupported",
+		code => "container_runtime_disabled",
+		category => "unsupported",
+		message => "Container runtime is disabled on this agent."
+	)) unless(CONTAINER_RUNTIME_ENABLED);
+	return (undef, container_game_failure(
+		status => "unsupported",
+		code => "unsupported_runtime",
+		category => "unsupported",
+		message => "Only the docker container runtime is available."
+	)) unless(CONTAINER_RUNTIME eq "docker");
+	my ($request, $request_error) = container_decode_request_without_decrypt($runtime_json);
+	return (undef, container_game_reply($request_error)) unless($request);
+	return (undef, container_game_failure(
+		status => "validation_failed",
+		code => "invalid_contract",
+		category => "validation",
+		message => "Container request contract must be " . GSE::Container::Models::CONTRACT_VERSION() . "."
+	)) unless(defined($request->{contract}) && $request->{contract} eq GSE::Container::Models::CONTRACT_VERSION());
+	return (undef, container_game_failure(
+		status => "validation_failed",
+		code => "invalid_contract",
+		category => "validation",
+		message => "Container target does not belong to this home."
+	)) if(defined($home_id) && !(ref($request->{target}) eq "HASH" && defined($request->{target}{home_id}) && "$request->{target}{home_id}" eq "$home_id"));
+	return ($request, undef);
+}
+
+# The agent-owned folder mounted read-only at /run/gse for one home.
+sub container_control_dir_without_decrypt
+{
+	my ($home_id) = @_;
+	return File::Spec->catdir(CONTAINER_DATA_ROOT, "homes", "" . (0 + $home_id));
+}
+
+# Docker on Windows needs Windows paths; Cygwin paths are used for the safety checks.
+sub container_docker_path_without_decrypt
+{
+	my ($path) = @_;
+	return $path unless($^O eq "cygwin");
+	my $run = GSE::Container::CommandRunner->new()->run(["cygpath", "-w", $path], 10);
+	my $converted = $run->{exit_code} == 0 ? $run->{stdout} : "";
+	$converted =~ s/[\r\n]+\z//;
+	return $converted ne "" ? $converted : $path;
+}
+
+# Resolves and checks everything the container may touch for a home. Nothing here comes
+# from the Panel JSON: the home path is the same value native Start receives.
+sub container_game_context_without_decrypt
+{
+	my ($home_id, $home_path, $game_key, $prepare) = @_;
+	return (undef, "home_id must be numeric") unless(defined($home_id) && $home_id =~ /^\d+$/ && $home_id > 0);
+	$home_path =~ s{/+$}{} if(defined($home_path));
+	return (undef, "management home is missing") unless(defined($home_path) && $home_path ne "" && -d $home_path);
+	my ($root_ok, $game_root, $root_error) = resolve_game_root_without_decrypt($home_path, $game_key);
+	return (undef, $root_error) unless($root_ok);
+	return (undef, "gamefiles folder is missing") unless(-d $game_root);
+	return (undef, "gamefiles folder must not be a symlink") if(-l $game_root);
+
+	my ($owner, $group) = gm_home_owner($home_id, $prepare ? 1 : 0);
+	my @owner_pw = getpwnam($owner);
+	my $uid = @owner_pw ? $owner_pw[2] : undef;
+	my $gid = getgrnam($group);
+	if($^O ne "cygwin")
+	{
+		return (undef, "server user $owner does not exist") unless(defined($uid));
+		return (undef, "server group $group does not exist") unless(defined($gid));
+		return (undef, "game servers must not run as root") if($uid == 0 || $gid == 0);
+		set_path_ownership($owner, $group, $home_path, 1) if($prepare);
+	}
+
+	my $game_root_real = Cwd::abs_path($game_root);
+	return (undef, "gamefiles folder cannot be resolved") unless(defined($game_root_real));
+	my $home_real = Cwd::abs_path($home_path);
+	return (undef, "gamefiles folder escapes the management home")
+		unless(defined($home_real) && index($game_root_real, "$home_real/") == 0);
+	if($^O ne "cygwin")
+	{
+		my @st = lstat($game_root_real);
+		return (undef, "gamefiles folder is not owned by $owner") unless(@st && $st[4] == $uid);
+	}
+
+	my $control_dir = container_control_dir_without_decrypt($home_id);
+	if($prepare)
+	{
+		mkpath($control_dir) unless(-d $control_dir);
+		chmod(0750, $control_dir);
+		chmod(0750, File::Spec->catdir(CONTAINER_DATA_ROOT, "homes"));
+		chmod(0750, CONTAINER_DATA_ROOT);
+		chown(-1, $gid, $control_dir, File::Spec->catdir(CONTAINER_DATA_ROOT, "homes"), CONTAINER_DATA_ROOT) if(defined($gid));
+	}
+	return (undef, "container control folder is missing") unless(-d $control_dir);
+	my $control_real = Cwd::abs_path($control_dir);
+
+	my @allowed = grep { $_ ne "" } split(/[\s,]+/, CONTAINER_ALLOWED_IMAGES);
+	my %context = (
+		home_path => $home_path,
+		game_root => $game_root_real,
+		control_dir => $control_real,
+		owner => $owner,
+		group => $group,
+		forbidden_roots => [ AGENT_RUN_DIR ],
+		allowed_image_prefixes => \@allowed,
+		network => CONTAINER_NETWORK,
+		workdir => CONTAINER_GAME_MOUNT,
+		entrypoint => "/bin/sh",
+		command => [ CONTAINER_CONTROL_MOUNT . "/launch.sh" ],
+		environment => {
+			HOME => "/tmp",
+			TINI_KILL_PROCESS_GROUP => "1",
+			GSE_HOME_ID => "" . $home_id
+		},
+		mounts => [
+			{
+				name => "gamefiles",
+				host_path => $game_root_real,
+				docker_source => container_docker_path_without_decrypt($game_root_real),
+				container_path => CONTAINER_GAME_MOUNT,
+				mode => "rw"
+			},
+			{
+				name => "control",
+				host_path => $control_real,
+				docker_source => container_docker_path_without_decrypt($control_real),
+				container_path => CONTAINER_CONTROL_MOUNT,
+				mode => "ro",
+				allow_inside_agent => 1
+			}
+		]
+	);
+	$context{run_as} = { uid => $uid, gid => $gid } if($^O ne "cygwin");
+	return (\%context, "");
+}
+
+# Single-quotes a value for /bin/sh.
+sub container_sh_quote
+{
+	my ($value) = @_;
+	$value = "" unless(defined($value));
+	$value =~ s/'/'\\''/g;
+	return "'$value'";
+}
+
+# Writes launch.sh (run inside the container) and an empty console.in. The startup line,
+# environment and pre-start commands are the same ones native Start uses, with host paths
+# under gamefiles mapped to /game. They run inside the container, never on the host.
+sub container_write_launch_without_decrypt
+{
+	my ($context, $home_id, $game_key, $server_exe, $run_dir, $startup_cmd, $preStart, $envVars) = @_;
+	my $game_root = $context->{game_root};
+	my ($payload_ok, $binary_dir, $payload_error) = resolve_game_payload_path_without_decrypt($context->{home_path}, $game_key, $run_dir);
+	return (0, $payload_error) unless($payload_ok);
+	my $binary_real = Cwd::abs_path($binary_dir);
+	return (0, "server binary folder is missing") unless(defined($binary_real) && -d $binary_real);
+	return (0, "server binary folder is outside gamefiles")
+		unless($binary_real eq $game_root || index($binary_real, "$game_root/") == 0);
+	(my $relative = substr($binary_real, length($game_root))) =~ s{^/+}{};
+	my $workdir = CONTAINER_GAME_MOUNT . ($relative ne "" ? "/$relative" : "");
+
+	my $screen_id = create_screen_id(SCREEN_TYPE_HOME, $home_id);
+	my $map = sub {
+		my ($text) = @_;
+		$text = replace_Env_Vars($screen_id, $home_id, $game_root, $text, $game_key);
+		$text =~ s/\Q$game_root\E/@{[CONTAINER_GAME_MOUNT]}/g;
+		$text =~ s/\Q$context->{home_path}\/gamefiles\E/@{[CONTAINER_GAME_MOUNT]}/g;
+		return $text;
+	};
+	my $startup = $map->(defined($startup_cmd) ? $startup_cmd : "");
+	my $extension = lc(substr(defined($server_exe) ? $server_exe : "", -4));
+	return (0, "Windows executables cannot run in a Linux container") if($extension eq ".exe" || $extension eq ".bat");
+	return (0, "server executable name is invalid") unless(defined($server_exe) && $server_exe ne "" && $server_exe !~ m{(^|/)\.\.(/|$)} && $server_exe !~ /[\x00-\x1f]/);
+	my $command = $extension eq ".jar" ? $startup : container_sh_quote("$workdir/$server_exe") . " " . $startup;
+	return (0, "startup command is empty") if($command =~ /\A\s*\z/);
+
+	my @lines = (
+		"#!/bin/sh",
+		"# Written by the GSE agent at every start. Changes here are overwritten.",
+		"umask 0002",
+		"cd " . container_sh_quote($workdir) . " || { echo 'GSE: game folder missing' >&2; exit 1; }",
+	);
+	foreach my $line (split /[\r\n]+/, (defined $envVars ? $envVars : ""))
+	{
+		$line = $map->($line);
+		push @lines, $line if($line =~ /\S/);
+	}
+	foreach my $line (split /[\r\n]+/, (defined $preStart ? $preStart : ""))
+	{
+		$line = $map->($line);
+		push @lines, $line if($line =~ /\S/);
+	}
+	push @lines, (
+		"# Console input: the agent appends lines to /run/gse/console.in.",
+		"rm -f /tmp/gse-console; mkfifo /tmp/gse-console || exit 1",
+		"tail -n 0 -F " . CONTAINER_CONTROL_MOUNT . "/console.in > /tmp/gse-console 2>/dev/null &",
+		"GSE_TAIL=\$!",
+		"$command < /tmp/gse-console &",
+		"GSE_GAME=\$!",
+		"trap 'kill -TERM \"\$GSE_GAME\" 2>/dev/null' TERM INT",
+		"GSE_STATUS=0",
+		"while kill -0 \"\$GSE_GAME\" 2>/dev/null; do wait \"\$GSE_GAME\"; GSE_STATUS=\$?; done",
+		"kill \"\$GSE_TAIL\" 2>/dev/null",
+		"exit \$GSE_STATUS"
+	);
+	my $dir = $context->{control_dir};
+	my $tmp = "$dir/.launch.sh.$$";
+	unlink $tmp;
+	sysopen(my $fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0640) or return (0, "cannot write launch script: $!");
+	print $fh join("\n", @lines) . "\n";
+	close($fh);
+	chmod(0640, $tmp);
+	rename($tmp, "$dir/launch.sh") or return (0, "cannot install launch script: $!");
+	unlink "$dir/console.in";
+	sysopen(my $in, "$dir/console.in", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0640) or return (0, "cannot create console input: $!");
+	close($in);
+	chmod(0640, "$dir/console.in");
+	return (1, "");
+}
+
+# True when a native (screen) copy of this home is running.
+sub container_native_running_without_decrypt
+{
+	my ($home_id) = @_;
+	return 1 if(is_screen_running_without_decrypt(SCREEN_TYPE_HOME, $home_id) == 1);
+	my @pids = get_home_pids($home_id);
+	return @pids ? 1 : 0;
+}
+
+# True when a GSE-managed container for this home is running (any allocation).
+sub container_running_for_home_without_decrypt
+{
+	my ($home_id) = @_;
+	return 0 unless(CONTAINER_RUNTIME_ENABLED && CONTAINER_RUNTIME eq "docker");
+	my $run = GSE::Container::CommandRunner->new()->run([CONTAINER_RUNTIME_DOCKER_BINARY, "ps", "-q",
+		"--filter", "label=gse.managed=true", "--filter", "label=gse.home_id=" . (0 + $home_id),
+		"--filter", "status=running"], 20);
+	return ($run->{exit_code} == 0 && $run->{stdout} =~ /\S/) ? 1 : 0;
+}
+
+# Start: same arguments as universal_start plus the runtime JSON. Creates (or safely recreates)
+# the container, writes launch.sh and starts it. Never falls back to a native start.
+sub container_game_start
+{
+	return container_game_reply(container_bad_encryption_response_without_decrypt())
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my ($home_id, $home_path, $server_exe, $run_dir, $startup_cmd, $server_port, $server_ip,
+		$cpu, $nice, $preStart, $envVars, $game_key, $console_log, $runtime_json) = decrypt_params(@_);
+	logger "Container start request received for HOME ID:$home_id.";
+	my ($request, $request_error) = container_game_request_without_decrypt($runtime_json, $home_id);
+	return $request_error unless($request);
+	return container_game_failure(
+		status => "conflict", code => "native_running", category => "conflict",
+		message => "This server is running natively; stop it before starting the container."
+	) if(container_native_running_without_decrypt($home_id));
+
+	my ($context, $context_error) = container_game_context_without_decrypt($home_id, $home_path, $game_key, 1);
+	return container_game_failure(
+		status => "validation_failed", code => "invalid_volume_path", category => "validation",
+		message => "Server folder failed the container safety checks: $context_error"
+	) unless($context);
+	return container_game_failure(
+		status => "unsupported", code => "no_approved_images", category => "unsupported",
+		message => "No container images are approved on this agent (container_allowed_images)."
+	) unless(@{$context->{allowed_image_prefixes}});
+
+	my ($launch_ok, $launch_error) = container_write_launch_without_decrypt($context, $home_id, $game_key,
+		$server_exe, $run_dir, $startup_cmd, $preStart, $envVars);
+	return container_game_failure(
+		status => "validation_failed", code => "invalid_launch", category => "validation",
+		message => "Cannot prepare the container start: $launch_error"
+	) unless($launch_ok);
+
+	my $runtime = container_runtime_adapter_without_decrypt();
+	$request->{recreate_if_changed} = 1;
+	my $created = $runtime->create($request, $context);
+	# A running container with an older configuration keeps running; it is recreated on the
+	# next start after a stop.
+	return container_game_reply($created)
+		unless($created->{success} || (($created->{error}{code} || "") eq "config_changed" && $created->{state} eq "running"));
+	my $started = $runtime->start($request, $context);
+	if($started->{success})
+	{
+		gm_remember_home($home_id, $home_path);
+		backup_home_log($home_id, Path::Class::File->new(SCREEN_LOGS_DIR, "screenlog." . create_screen_id(SCREEN_TYPE_HOME, $home_id)),
+			$context->{game_root} . "/" . (defined($console_log) ? $console_log : ""));
+		queue_agent_event("server_process_started", "info", {
+			home_id => $home_id,
+			game_home_path => $home_path,
+			game_root => $context->{game_root},
+			ip => $server_ip,
+			game_port => $server_port,
+			execution_backend => "docker",
+			container_name => $started->{target}{container_name},
+			actual_process_state => "starting",
+			actual_port_state => "pending_validation",
+			message => "Container started; waiting for the game port."
+		});
+		$started->{state} = "starting";
+		$started->{result}{created} = $created->{status};
+	}
+	return container_game_reply($started);
+}
+
+# Stop: sends the game's own stop command to the console, waits up to timeout_seconds for a
+# clean exit (world save), then lets Docker stop it (SIGTERM, then SIGKILL after 15 s).
+sub container_game_stop
+{
+	return container_game_reply(container_bad_encryption_response_without_decrypt())
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my ($home_id, $runtime_json) = decrypt_params(@_);
+	my ($request, $request_error) = container_game_request_without_decrypt($runtime_json, $home_id);
+	return $request_error unless($request);
+	my $runtime = container_runtime_adapter_without_decrypt();
+	my $current = $runtime->inspect($request);
+	if(!$current->{success})
+	{
+		return container_game_reply(GSE::Container::Result->success(
+			status => "already_absent", state => "stopped", message => "No container exists for this server.",
+			target => $current->{target} || {}
+		)) if(($current->{error}{code} || "") eq "container_not_found");
+		return container_game_reply($current);
+	}
+	my $graceful = "skipped";
+	if($current->{state} eq "running" && defined($request->{stop_command}) && $request->{stop_command} =~ /\A[^\x00-\x1f\x7f]{1,256}\z/)
+	{
+		my $console = container_control_dir_without_decrypt($home_id) . "/console.in";
+		if(!-l $console && open(my $fh, '>>', $console))
+		{
+			print $fh $request->{stop_command} . "\n";
+			close($fh);
+			my $deadline = time() + GSE::Container::Models::_bounded_int($request->{timeout_seconds}, 60, 5, 300);
+			$graceful = "timeout";
+			while(time() < $deadline)
+			{
+				sleep 1;
+				my $now = $runtime->inspect($request);
+				if($now->{success} && $now->{state} ne "running")
+				{
+					$graceful = "clean";
+					last;
+				}
+			}
+		}
+	}
+	my $stopped = $runtime->stop({ %$request, timeout_seconds => 15 });
+	$stopped->{result}{graceful} = $graceful if($stopped->{success});
+	logger "Container stop for HOME ID:$home_id: " . ($stopped->{status} || "failed") . " (graceful: $graceful).";
+	return container_game_reply($stopped);
+}
+
+# Status: container state plus game readiness. Running is not online: the game port must
+# accept a connection on the container's own address (the host port always answers via Docker).
+sub container_game_status
+{
+	return container_game_reply(container_bad_encryption_response_without_decrypt())
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my ($home_id, $runtime_json) = decrypt_params(@_);
+	my ($request, $request_error) = container_game_request_without_decrypt($runtime_json, $home_id);
+	return $request_error unless($request);
+	my $runtime = container_runtime_adapter_without_decrypt();
+	my $current = $runtime->inspect($request);
+	if(!$current->{success})
+	{
+		my $code = $current->{error}{code} || "";
+		$current->{result}{game_state} = $code eq "container_not_found" ? "STOPPED"
+			: $code eq "runtime_unavailable" ? "RUNTIME_UNAVAILABLE" : "UNKNOWN";
+		return container_game_reply($current);
+	}
+	my $summary = $current->{result}{summary} || {};
+	my $game_state = "UNKNOWN";
+	if($current->{state} eq "running")
+	{
+		$game_state = "STARTING";
+		my $port = $request->{readiness_port};
+		if(defined($port) && $port =~ /^\d+$/)
+		{
+			my $ip_run = GSE::Container::CommandRunner->new()->run([CONTAINER_RUNTIME_DOCKER_BINARY, "container", "inspect", "--format",
+				"{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", $current->{target}{container_name}], 20);
+			my ($ip) = ($ip_run->{stdout} || "") =~ /(\d+\.\d+\.\d+\.\d+)/;
+			if($ip)
+			{
+				my $socket = IO::Socket::INET->new(PeerAddr => $ip, PeerPort => $port, Proto => "tcp", Timeout => 2);
+				if($socket)
+				{
+					$game_state = "ONLINE";
+					close($socket);
+				}
+			}
+		}
+		elsif(($request->{readiness} || "") eq "running")
+		{
+			$game_state = "ONLINE";
+		}
+		my $stats = $runtime->stats($request);
+		$current->{result}{stats} = $stats->{result} if($stats->{success});
+	}
+	elsif($current->{state} eq "oom") { $game_state = "OOM"; }
+	elsif($current->{state} eq "created") { $game_state = "CREATED"; }
+	elsif($current->{state} eq "restarting") { $game_state = "STARTING"; }
+	elsif($current->{state} eq "stopped")
+	{
+		$game_state = (defined($summary->{exit_code}) && $summary->{exit_code} != 0 && $summary->{exit_code} != 143) ? "FAILED" : "STOPPED";
+	}
+	$current->{result}{game_state} = $game_state;
+	return container_game_reply($current);
+}
+
+# Console input: one line appended to the game's console, only while it runs.
+sub container_game_command
+{
+	return container_game_reply(container_bad_encryption_response_without_decrypt())
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my ($home_id, $runtime_json, $line) = decrypt_params(@_);
+	my ($request, $request_error) = container_game_request_without_decrypt($runtime_json, $home_id);
+	return $request_error unless($request);
+	return container_game_failure(
+		status => "validation_failed", code => "invalid_command", category => "validation",
+		message => "Console command must be one line of at most 1024 characters."
+	) unless(defined($line) && $line =~ /\A[^\x00-\x1f\x7f]{1,1024}\z/);
+	my $runtime = container_runtime_adapter_without_decrypt();
+	my $current = $runtime->inspect($request);
+	return container_game_reply($current) unless($current->{success});
+	return container_game_failure(
+		status => "conflict", code => "not_running", category => "conflict",
+		message => "The server is not running."
+	) unless($current->{state} eq "running");
+	my $console = container_control_dir_without_decrypt($home_id) . "/console.in";
+	return container_game_failure(code => "console_unavailable", category => "runtime", message => "Console input is not available.")
+		if(-l $console || !-f $console);
+	open(my $fh, '>>', $console) or return container_game_failure(code => "console_unavailable", category => "runtime", message => "Console input is not available.");
+	print $fh "$line\n";
+	close($fh);
+	return container_game_reply(GSE::Container::Result->success(
+		status => "sent", state => "running", message => "Command sent.", target => $current->{target}
+	));
+}
+
+# Remove: deletes a stopped container. The game files stay on the host.
+sub container_game_remove
+{
+	return container_game_reply(container_bad_encryption_response_without_decrypt())
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my ($home_id, $runtime_json) = decrypt_params(@_);
+	my ($request, $request_error) = container_game_request_without_decrypt($runtime_json, $home_id);
+	return $request_error unless($request);
+	return container_game_reply(container_runtime_adapter_without_decrypt()->delete({ %$request, allow_absent => 1 }));
+}
+
+# Output the container itself printed (bounded), for when the game writes no log file yet.
+sub container_game_logs
+{
+	return container_game_reply(container_bad_encryption_response_without_decrypt())
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my ($home_id, $runtime_json, $lines) = decrypt_params(@_);
+	my ($request, $request_error) = container_game_request_without_decrypt($runtime_json, $home_id);
+	return $request_error unless($request);
+	return container_game_reply(container_runtime_adapter_without_decrypt()->logs({ %$request, lines => $lines }));
 }
 
 sub check_steam_cmd_client
@@ -2736,7 +3250,10 @@ sub gm_write_prestart
 		$line = replace_Env_Vars($screen_id, $home_id, $game_root, $line, $game_key);
 		push @lines, $line if($line ne "");
 	}
-	open(my $fh, '>', "$home_path/gse_prestart.sh") or return 0;
+	# The home is writable by the game user, so never write through a symlink planted there.
+	my $prestart = "$home_path/gse_prestart.sh";
+	unlink $prestart if(-l $prestart || -e $prestart);
+	sysopen(my $fh, $prestart, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0664) or return 0;
 	print $fh join("\n", @lines) . "\n";
 	close($fh);
 	return 1;
@@ -2786,6 +3303,12 @@ sub universal_start_without_decrypt
 	{
 		logger "Could not find server binary directory $game_binary_dir.";
 		return -12;
+	}
+
+	if(container_running_for_home_without_decrypt($home_id))
+	{
+		logger "HOME ID:$home_id is running in a container; native start refused.";
+		return -18;
 	}
 
 	my ($owner, $group) = gm_home_owner($home_id, 1);
@@ -3969,19 +4492,20 @@ sub set_path_ownership
 	# Set owner and perms on it recursivelly as well
 	my $chownCommand = "chown -Rf $owner_uid:$group_uid '$path'";
 	my $chmodCommand = "chmod -Rf ug+rwx '$path'";
-	my $chmodCommandDir = "chmod -Rf o+rx `find '$path' -type d`";
+	my $chmodCommandDir = "find '$path' -type d -exec chmod o+rx {} +";
 	sudo_exec_without_decrypt($chownCommand);
 	sudo_exec_without_decrypt($chmodCommand);
 	sudo_exec_without_decrypt($chmodCommandDir);
 
-	my $groupCommand = "find '$path' -type d | xargs chmod g+s";
+	# find -exec passes names as arguments, so customer file names are never parsed by a root shell.
+	my $groupCommand = "find '$path' -type d -exec chmod g+s {} +";
 	sudo_exec_without_decrypt($groupCommand);
 
-	$groupCommand = "find '$path' -type d | xargs setfacl -d -m u::rwX,g::rwX,o::rx";
+	$groupCommand = "find '$path' -type d -exec setfacl -d -m u::rwX,g::rwX,o::rx {} +";
 	sudo_exec_without_decrypt($groupCommand);
 
 	# Remove perms for other users
-	$chmodCommand = "chmod -Rf o-rwx `find '$path' -type f`";
+	$chmodCommand = "find '$path' -type f -exec chmod o-rwx {} +";
 	sudo_exec_without_decrypt($chmodCommand);
 
 	return 0;

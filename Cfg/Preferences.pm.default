@@ -13,4 +13,7 @@
 	container_runtime => 'docker',
 	container_runtime_docker_binary => 'docker',
 	container_data_root => '',
+	# Approved image prefixes for game containers, comma separated (empty = no containers).
+	container_allowed_images => '',
+	container_network => 'gse-games',
 );
