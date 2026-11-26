@@ -3,6 +3,9 @@
 Each fixed issue gets an entry under the version that shipped it: a one-line title, then the cause and the fix in plain language, written so a customer can follow it.
 
 ## Unreleased
+- **Console logs are read safely (security):** reading a server's console log ran `chmod 777` as root on a file the customer could replace with a link, and passed the file name to a shell. A plugin could use this to take over the machine or read the agent's key. Logs are now read as the server's own user, links are refused, and nothing is passed to a shell.
+- **Server folder permissions are fixed safely (security):** fixing permissions passed customer file names to root `chmod` through a shell, so a file named like a system path could change that system file. Names are now passed as arguments only. The start script is no longer written through links.
+- **Game servers can run in Docker containers:** an admin can choose Docker for a server. The server keeps its folder, FTP, file manager, ports and startup line; the game runs as the server's own user with no extra rights, cannot see other servers, the agent or the host, and has CPU, RAM and process limits. Native stays the default. Set up a node with `scripts/gse_container_host.sh`.
 - **Linux version numbers match Windows:** the Linux agent restarts its numbering at 1.5.3, the same as the Windows agent. Linux agents numbered 0.x are old and should be updated.
 - **Steam installs on Linux:** SteamCMD is told to download the Linux build, and a Steam Guard code is sent only for a real Steam account. Anonymous installs such as Counter-Strike: Source (AppID 232330) no longer fail with "Missing configuration".
 - **Docker container RPCs, as on Windows:** the opt-in `container_*` RPCs and `GSE/Container/Runtime.pm` (the same file as the Windows agent) are now in the Linux agent. They are off unless `container_runtime_enabled` is `1`, and they do not change how normal game servers run.
