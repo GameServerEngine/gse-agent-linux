@@ -148,7 +148,9 @@ control folder read-only at `/run/gse` (`launch.sh`, `console.in`). The containe
 the server's Linux user with all capabilities dropped, no-new-privileges, a read-only root,
 PID/CPU/RAM limits (no swap unless `memory_burst_mb` is set), bounded logs and the
 `gse-games` network (no container-to-container traffic; the host firewall blocks the host
-and private ranges). Docker's restart policy is `no`: the GSE watchdog owns restarts.
+and private ranges). Restarts: the Panel sends `on-failure:3`, so Docker restarts crashes
+only; a clean or panel stop stays stopped; the native watchdog is set to STOPPED for the
+home; and the agent starts containers marked RUNNING again after an agent or host restart.
 Disk quotas are not enforced (`storage_quota: false`). Native start returns `-18` while a
 container for the home runs, and container start refuses while a native copy runs.
 

@@ -1045,6 +1045,18 @@ if(-e Path::Class::File->new(FD_DIR, 'Settings.pm'))
 	}
 
 
+if(CONTAINER_RUNTIME_ENABLED)
+{
+	my $recover_pid = fork();
+	if(defined($recover_pid) && $recover_pid == 0)
+	{
+		sleep 15;
+		eval { container_recover_without_decrypt(); };
+		logger "Container recovery failed: $@" if($@);
+		exit 0;
+	}
+}
+
 my $d = Frontier::Daemon::GSP::Forking->new(
 			 methods => {
 					 is_screen_running				=> \&is_screen_running,
@@ -1889,6 +1901,71 @@ sub container_write_launch_without_decrypt
 	return (1, "");
 }
 
+# Small agent-owned state files in the control folder (not visible to the game).
+sub container_write_control_file_without_decrypt
+{
+	my ($home_id, $name, $value) = @_;
+	return 0 unless($name =~ /\A[a-z_]+\z/);
+	my $dir = container_control_dir_without_decrypt($home_id);
+	return 0 unless(-d $dir);
+	my $tmp = "$dir/.$name.$$";
+	unlink $tmp;
+	sysopen(my $fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0640) or return 0;
+	print $fh ((defined($value) ? $value : "") . "\n");
+	close($fh);
+	return rename($tmp, "$dir/$name") ? 1 : 0;
+}
+
+sub container_read_control_file_without_decrypt
+{
+	my ($home_id, $name) = @_;
+	my $path = container_control_dir_without_decrypt($home_id) . "/$name";
+	return "" if(-l $path || !-f $path);
+	open(my $fh, '<', $path) or return "";
+	my $value = <$fh>;
+	close($fh);
+	$value = "" unless(defined($value));
+	chomp $value;
+	return $value;
+}
+
+# After an agent or host restart, starts the containers whose server was running before
+# (desired RUNNING). Docker's on-failure policy only restarts crashes, never a reboot.
+sub container_recover_without_decrypt
+{
+	return unless(CONTAINER_RUNTIME_ENABLED && CONTAINER_RUNTIME eq "docker");
+	my $homes = File::Spec->catdir(CONTAINER_DATA_ROOT, "homes");
+	opendir(my $dh, $homes) or return;
+	my @ids = grep { /^\d+$/ } readdir($dh);
+	closedir($dh);
+	my $runner = GSE::Container::CommandRunner->new();
+	my $runtime = container_runtime_adapter_without_decrypt();
+	foreach my $home_id (@ids)
+	{
+		next unless(container_read_control_file_without_decrypt($home_id, "desired") eq "RUNNING");
+		my $list = $runner->run([CONTAINER_RUNTIME_DOCKER_BINARY, "ps", "-a", "--filter", "label=gse.managed=true",
+			"--filter", "label=gse.home_id=$home_id", "--filter", "status=exited", "--filter", "status=created",
+			"--format", "{{.Names}}"], 30);
+		next unless($list->{exit_code} == 0);
+		foreach my $name (grep { /\Agse-h\d+-a\d+\z/ } split(/\s+/, $list->{stdout}))
+		{
+			my $labels_run = $runner->run([CONTAINER_RUNTIME_DOCKER_BINARY, "container", "inspect", "--format", "{{json .Config.Labels}}", $name], 30);
+			my $labels = eval { JSON::PP->new->decode($labels_run->{stdout}) } || {};
+			my $target = { map { $_ => $labels->{"gse.$_"} } qw(server_id home_id allocation_id owner_user_id) };
+			my ($context) = container_game_context_without_decrypt($home_id,
+				container_read_control_file_without_decrypt($home_id, "home_path"),
+				container_read_control_file_without_decrypt($home_id, "game_key"), 0);
+			if(!$context)
+			{
+				logger "Container recovery for HOME ID:$home_id skipped: the server folder failed its checks.";
+				next;
+			}
+			my $started = $runtime->start({ contract => GSE::Container::Models::CONTRACT_VERSION(), target => $target }, $context);
+			logger "Container recovery for HOME ID:$home_id ($name): " . ($started->{success} ? "started" : ($started->{error}{message} || "failed"));
+		}
+	}
+}
+
 # True when a native (screen) copy of this home is running.
 sub container_native_running_without_decrypt
 {
@@ -1942,6 +2019,11 @@ sub container_game_start
 		message => "Cannot prepare the container start: $launch_error"
 	) unless($launch_ok);
 
+	# The native watchdog must never relaunch this home outside the container.
+	gm()->set_desired($home_id, "STOPPED");
+	container_write_control_file_without_decrypt($home_id, "home_path", $home_path);
+	container_write_control_file_without_decrypt($home_id, "game_key", $game_key);
+
 	my $runtime = container_runtime_adapter_without_decrypt();
 	$request->{recreate_if_changed} = 1;
 	my $created = $runtime->create($request, $context);
@@ -1952,6 +2034,7 @@ sub container_game_start
 	my $started = $runtime->start($request, $context);
 	if($started->{success})
 	{
+		container_write_control_file_without_decrypt($home_id, "desired", "RUNNING");
 		gm_remember_home($home_id, $home_path);
 		backup_home_log($home_id, Path::Class::File->new(SCREEN_LOGS_DIR, "screenlog." . create_screen_id(SCREEN_TYPE_HOME, $home_id)),
 			$context->{game_root} . "/" . (defined($console_log) ? $console_log : ""));
@@ -1982,6 +2065,7 @@ sub container_game_stop
 	my ($home_id, $runtime_json) = decrypt_params(@_);
 	my ($request, $request_error) = container_game_request_without_decrypt($runtime_json, $home_id);
 	return $request_error unless($request);
+	container_write_control_file_without_decrypt($home_id, "desired", "STOPPED");
 	my $runtime = container_runtime_adapter_without_decrypt();
 	my $current = $runtime->inspect($request);
 	if(!$current->{success})
@@ -2063,8 +2147,11 @@ sub container_game_status
 		{
 			$game_state = "ONLINE";
 		}
-		my $stats = $runtime->stats($request);
-		$current->{result}{stats} = $stats->{result} if($stats->{success});
+		if($request->{include_stats})
+		{
+			my $stats = $runtime->stats($request);
+			$current->{result}{stats} = $stats->{result} if($stats->{success});
+		}
 	}
 	elsif($current->{state} eq "oom") { $game_state = "OOM"; }
 	elsif($current->{state} eq "created") { $game_state = "CREATED"; }
@@ -3778,7 +3865,8 @@ sub get_log
 
 	my $encoded_content = encode_list(@modedlines);
 	chdir AGENT_RUN_DIR;
-	if(is_screen_running_without_decrypt($screen_type, $home_id) == 1)
+	if(is_screen_running_without_decrypt($screen_type, $home_id) == 1
+		|| ($screen_type eq SCREEN_TYPE_HOME && container_running_for_home_without_decrypt($home_id)))
 	{
 		return "1;" . $encoded_content;
 	}
