@@ -2000,7 +2000,9 @@ sub container_game_start
 		message => "Cannot prepare the container start: $launch_error"
 	) unless($launch_ok);
 
-	# The native watchdog must never relaunch this home outside the container.
+	# The native watchdog must never relaunch this home outside the container. It finds the
+	# home's folder through the home index, so record the home first (as native Start does).
+	gm_remember_home($home_id, $home_path);
 	gm()->set_desired($home_id, "STOPPED");
 	container_write_control_file_without_decrypt($home_id, "home_path", $home_path);
 	container_write_control_file_without_decrypt($home_id, "game_key", $game_key);
@@ -2016,7 +2018,6 @@ sub container_game_start
 	if($started->{success})
 	{
 		container_write_control_file_without_decrypt($home_id, "desired", "RUNNING");
-		gm_remember_home($home_id, $home_path);
 		backup_home_log($home_id, Path::Class::File->new(SCREEN_LOGS_DIR, "screenlog." . create_screen_id(SCREEN_TYPE_HOME, $home_id)),
 			$context->{game_root} . "/" . (defined($console_log) ? $console_log : ""));
 		queue_agent_event("server_process_started", "info", {
