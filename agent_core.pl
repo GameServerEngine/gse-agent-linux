@@ -1718,17 +1718,6 @@ sub container_control_dir_without_decrypt
 	return File::Spec->catdir(CONTAINER_DATA_ROOT, "homes", "" . (0 + $home_id));
 }
 
-# Docker on Windows needs Windows paths; Cygwin paths are used for the safety checks.
-sub container_docker_path_without_decrypt
-{
-	my ($path) = @_;
-	return $path unless($^O eq "cygwin");
-	my $run = GSE::Container::CommandRunner->new()->run(["cygpath", "-w", $path], 10);
-	my $converted = $run->{exit_code} == 0 ? $run->{stdout} : "";
-	$converted =~ s/[\r\n]+\z//;
-	return $converted ne "" ? $converted : $path;
-}
-
 # Resolves and checks everything the container may touch for a home. Nothing here comes
 # from the Panel JSON: the home path is the same value native Start receives.
 sub container_game_context_without_decrypt
@@ -1746,24 +1735,18 @@ sub container_game_context_without_decrypt
 	my @owner_pw = getpwnam($owner);
 	my $uid = @owner_pw ? $owner_pw[2] : undef;
 	my $gid = getgrnam($group);
-	if($^O ne "cygwin")
-	{
-		return (undef, "server user $owner does not exist") unless(defined($uid));
-		return (undef, "server group $group does not exist") unless(defined($gid));
-		return (undef, "game servers must not run as root") if($uid == 0 || $gid == 0);
-		set_path_ownership($owner, $group, $home_path, 1) if($prepare);
-	}
+	return (undef, "server user $owner does not exist") unless(defined($uid));
+	return (undef, "server group $group does not exist") unless(defined($gid));
+	return (undef, "game servers must not run as root") if($uid == 0 || $gid == 0);
+	set_path_ownership($owner, $group, $home_path, 1) if($prepare);
 
 	my $game_root_real = Cwd::abs_path($game_root);
 	return (undef, "gamefiles folder cannot be resolved") unless(defined($game_root_real));
 	my $home_real = Cwd::abs_path($home_path);
 	return (undef, "gamefiles folder escapes the management home")
 		unless(defined($home_real) && index($game_root_real, "$home_real/") == 0);
-	if($^O ne "cygwin")
-	{
-		my @st = lstat($game_root_real);
-		return (undef, "gamefiles folder is not owned by $owner") unless(@st && $st[4] == $uid);
-	}
+	my @st = lstat($game_root_real);
+	return (undef, "gamefiles folder is not owned by $owner") unless(@st && $st[4] == $uid);
 
 	my $control_dir = container_control_dir_without_decrypt($home_id);
 	if($prepare)
@@ -1772,7 +1755,7 @@ sub container_game_context_without_decrypt
 		chmod(0750, $control_dir);
 		chmod(0750, File::Spec->catdir(CONTAINER_DATA_ROOT, "homes"));
 		chmod(0750, CONTAINER_DATA_ROOT);
-		chown(-1, $gid, $control_dir, File::Spec->catdir(CONTAINER_DATA_ROOT, "homes"), CONTAINER_DATA_ROOT) if(defined($gid));
+		chown(-1, $gid, $control_dir, File::Spec->catdir(CONTAINER_DATA_ROOT, "homes"), CONTAINER_DATA_ROOT);
 	}
 	return (undef, "container control folder is missing") unless(-d $control_dir);
 	my $control_real = Cwd::abs_path($control_dir);
@@ -1799,21 +1782,19 @@ sub container_game_context_without_decrypt
 			{
 				name => "gamefiles",
 				host_path => $game_root_real,
-				docker_source => container_docker_path_without_decrypt($game_root_real),
 				container_path => CONTAINER_GAME_MOUNT,
 				mode => "rw"
 			},
 			{
 				name => "control",
 				host_path => $control_real,
-				docker_source => container_docker_path_without_decrypt($control_real),
 				container_path => CONTAINER_CONTROL_MOUNT,
 				mode => "ro",
 				allow_inside_agent => 1
 			}
-		]
+		],
+		run_as => { uid => $uid, gid => $gid }
 	);
-	$context{run_as} = { uid => $uid, gid => $gid } if($^O ne "cygwin");
 	return (\%context, "");
 }
 
@@ -3599,6 +3580,50 @@ sub quick_chk
 	return 0;
 }
 
+# A log may be read only when it is a regular file (not a symlink) whose real path stays
+# inside the server's management home or the agent's screen-log folder.
+sub log_file_is_safe_without_decrypt
+{
+	my ($log_file, $home_path) = @_;
+	return (0, "log path is empty") unless(defined($log_file) && $log_file ne "");
+	return (0, "log path contains a control character") if($log_file =~ /[\x00-\x1f\x7f]/);
+	return (0, "log path is a symlink") if(-l $log_file);
+	return (0, "log path is not a regular file") unless(-f $log_file);
+	my $real = Cwd::abs_path($log_file);
+	return (0, "log path cannot be resolved") unless(defined($real) && $real ne "");
+	foreach my $root ($home_path, "" . SCREEN_LOGS_DIR)
+	{
+		next unless(defined($root) && $root ne "");
+		my $root_real = Cwd::abs_path($root);
+		next unless(defined($root_real) && $root_real ne "" && $root_real ne "/");
+		return (1, "") if(index($real, "$root_real/") == 0);
+	}
+	return (0, "log path is outside the server folder");
+}
+
+# Returns the last lines of a log, read as the server's own Linux user so a swapped path
+# can only ever reach files that user could already read.
+sub read_log_tail_as_owner_without_decrypt
+{
+	my ($home_id, $log_file, $lines) = @_;
+	my ($owner) = gm_home_owner($home_id, 0);
+	my $agent_user = `whoami`;
+	chomp $agent_user;
+	(my $quoted = $log_file) =~ s/'/'\\''/g;
+	my $cmd = "tail -n " . (0 + $lines) . " -- '$quoted'";
+	my $out;
+	if(defined($owner) && $owner ne "" && $owner ne $agent_user && defined(getpwnam($owner)))
+	{
+		($out) = gm_run_as($cmd, $owner);
+	}
+	else
+	{
+		$out = `$cmd 2>/dev/null`;
+	}
+	$out = "" unless(defined($out));
+	return map { "$_\n" } split(/\n/, $out);
+}
+
 sub log_path_has_wildcards
 {
 	my ($path) = @_;
@@ -3695,50 +3720,6 @@ sub resolve_latest_log_match
 	return undef unless scalar(@candidates) > 0;
 	@candidates = sort { $b->[1] <=> $a->[1] || $b->[0] cmp $a->[0] } @candidates;
 	return $candidates[0]->[0];
-}
-
-# A log may be read only when it is a regular file (not a symlink) whose real path stays
-# inside the server's management home or the agent's screen-log folder.
-sub log_file_is_safe_without_decrypt
-{
-	my ($log_file, $home_path) = @_;
-	return (0, "log path is empty") unless(defined($log_file) && $log_file ne "");
-	return (0, "log path contains a control character") if($log_file =~ /[\x00-\x1f\x7f]/);
-	return (0, "log path is a symlink") if(-l $log_file);
-	return (0, "log path is not a regular file") unless(-f $log_file);
-	my $real = Cwd::abs_path($log_file);
-	return (0, "log path cannot be resolved") unless(defined($real) && $real ne "");
-	foreach my $root ($home_path, "" . SCREEN_LOGS_DIR)
-	{
-		next unless(defined($root) && $root ne "");
-		my $root_real = Cwd::abs_path($root);
-		next unless(defined($root_real) && $root_real ne "" && $root_real ne "/");
-		return (1, "") if(index($real, "$root_real/") == 0);
-	}
-	return (0, "log path is outside the server folder");
-}
-
-# Returns the last lines of a log, read as the server's own Linux user so a swapped path
-# can only ever reach files that user could already read.
-sub read_log_tail_as_owner_without_decrypt
-{
-	my ($home_id, $log_file, $lines) = @_;
-	my ($owner) = gm_home_owner($home_id, 0);
-	my $agent_user = `whoami`;
-	chomp $agent_user;
-	(my $quoted = $log_file) =~ s/'/'\\''/g;
-	my $cmd = "tail -n " . (0 + $lines) . " -- '$quoted'";
-	my $out;
-	if(defined($owner) && $owner ne "" && $owner ne $agent_user && defined(getpwnam($owner)))
-	{
-		($out) = gm_run_as($cmd, $owner);
-	}
-	else
-	{
-		$out = `$cmd 2>/dev/null`;
-	}
-	$out = "" unless(defined($out));
-	return map { "$_\n" } split(/\n/, $out);
 }
 
 ### Return -10 If home path is not found.
