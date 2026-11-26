@@ -32,7 +32,7 @@ use File::Basename; # Used to get the file name or the directory name from a giv
 use Crypt::XXTEA;	# Encryption between webpages and agent.
 use Cfg::Config;	 # Config file
 use Cfg::Preferences;   # Preferences file
-use Fcntl ':flock';  # Import LOCK_* constants for file locking
+use Fcntl qw(:flock O_WRONLY O_CREAT O_EXCL O_NOFOLLOW);  # LOCK_* for file locking, O_* for symlink-safe log files
 use LWP::UserAgent; # Used for fetching URLs
 use MIME::Base64;	# Used to ensure data travelling right through the network.
 use Getopt::Long;	# Used for command line params.
@@ -605,8 +605,10 @@ if (!-d SCREEN_LOGS_DIR && !mkdir SCREEN_LOGS_DIR)
 	exit -1;
 }
 
-if ( ! chmod 0777, SCREEN_LOGS_DIR ){
-	logger "Could not chmod 777 " . SCREEN_LOGS_DIR . " directory $!.", 1;
+# Sticky bit: every game user may create its own screen log, but none may delete,
+# rename or replace another server's log (which also blocks symlink swaps).
+if ( ! chmod 01777, SCREEN_LOGS_DIR ){
+	logger "Could not chmod 1777 " . SCREEN_LOGS_DIR . " directory $!.", 1;
 	exit -1;
 }
 
@@ -3085,6 +3087,50 @@ sub resolve_latest_log_match
 	return $candidates[0]->[0];
 }
 
+# A log may be read only when it is a regular file (not a symlink) whose real path stays
+# inside the server's management home or the agent's screen-log folder.
+sub log_file_is_safe_without_decrypt
+{
+	my ($log_file, $home_path) = @_;
+	return (0, "log path is empty") unless(defined($log_file) && $log_file ne "");
+	return (0, "log path contains a control character") if($log_file =~ /[\x00-\x1f\x7f]/);
+	return (0, "log path is a symlink") if(-l $log_file);
+	return (0, "log path is not a regular file") unless(-f $log_file);
+	my $real = Cwd::abs_path($log_file);
+	return (0, "log path cannot be resolved") unless(defined($real) && $real ne "");
+	foreach my $root ($home_path, "" . SCREEN_LOGS_DIR)
+	{
+		next unless(defined($root) && $root ne "");
+		my $root_real = Cwd::abs_path($root);
+		next unless(defined($root_real) && $root_real ne "" && $root_real ne "/");
+		return (1, "") if(index($real, "$root_real/") == 0);
+	}
+	return (0, "log path is outside the server folder");
+}
+
+# Returns the last lines of a log, read as the server's own Linux user so a swapped path
+# can only ever reach files that user could already read.
+sub read_log_tail_as_owner_without_decrypt
+{
+	my ($home_id, $log_file, $lines) = @_;
+	my ($owner) = gm_home_owner($home_id, 0);
+	my $agent_user = `whoami`;
+	chomp $agent_user;
+	(my $quoted = $log_file) =~ s/'/'\\''/g;
+	my $cmd = "tail -n " . (0 + $lines) . " -- '$quoted'";
+	my $out;
+	if(defined($owner) && $owner ne "" && $owner ne $agent_user && defined(getpwnam($owner)))
+	{
+		($out) = gm_run_as($cmd, $owner);
+	}
+	else
+	{
+		$out = `$cmd 2>/dev/null`;
+	}
+	$out = "" unless(defined($out));
+	return map { "$_\n" } split(/\n/, $out);
+}
+
 ### Return -10 If home path is not found.
 ### Return -9  If log type was invalid.
 ### Return -8  If log file was not found.
@@ -3135,25 +3181,13 @@ sub get_log
 		}
 	}
 
-	sudo_exec_without_decrypt("chmod 777 \"$log_file\"");
-
-	# Create local copy of current log file if SCREEN_LOG_LOCAL = 1
-	if(SCREEN_LOG_LOCAL == 1)
-	{
-		my $log_local = Path::Class::File->new($home_path, "LOG_$screen_type.txt");
-		if ( -e $log_local )
-		{
-			unlink $log_local;
-		}
-
-		# Copy log file only if it's not an UPDATE type as it may contain steam credentials
-		if($screen_type eq SCREEN_TYPE_HOME){
-			copy($log_file, $log_local);
-		}
-	}
+	# The log lives in a folder the customer can write to, so it is never chmod-ed as root,
+	# never followed through a symlink and never passed to a shell unquoted.
+	$nb_of_lines = 100 unless(defined($nb_of_lines) && $nb_of_lines =~ /^\d+\z/ && $nb_of_lines > 0);
+	$nb_of_lines = 5000 if($nb_of_lines > 5000);
 
 	# Regenerate the log file if it doesn't exist
-	unless ( -e $log_file )
+	unless ( -e $log_file || -l $log_file )
 	{
 		if ($log_request_wildcard)
 		{
@@ -3161,11 +3195,11 @@ sub get_log
 			return -8;
 		}
 
-		if (open(NEWLOG, '>', $log_file))
+		if (sysopen(my $newlog, "$log_file", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0664))
 		{
 			logger "Log file missing, regenerating: " . $log_file;
-			print NEWLOG "Log file missing, started new log\n";
-			close(NEWLOG);
+			print $newlog "Log file missing, started new log\n";
+			close($newlog);
 		}
 		else
 		{
@@ -3174,8 +3208,28 @@ sub get_log
 		}
 	}
 
-	# Return a few lines of output to the web browser
-	my(@modedlines) = `tail -n $nb_of_lines $log_file`;
+	my ($log_safe, $log_error) = log_file_is_safe_without_decrypt("$log_file", $home_path);
+	if(!$log_safe)
+	{
+		logger "Refusing to read log $log_file for HOME ID:$home_id: $log_error";
+		return -8;
+	}
+
+	# Return a few lines of output to the web browser, read as the server's own Linux user.
+	my(@modedlines) = read_log_tail_as_owner_without_decrypt($home_id, "$log_file", $nb_of_lines);
+
+	# Create local copy of current log file if SCREEN_LOG_LOCAL = 1
+	# (only the lines already read; never copied through a symlink).
+	if(SCREEN_LOG_LOCAL == 1 && $screen_type eq SCREEN_TYPE_HOME)
+	{
+		my $log_local = Path::Class::File->new($home_path, "LOG_$screen_type.txt");
+		unlink "$log_local" if( -e "$log_local" || -l "$log_local" );
+		if (sysopen(my $local_fh, "$log_local", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0664))
+		{
+			print $local_fh @modedlines;
+			close($local_fh);
+		}
+	}
 
 	my $linecount = 0;
 
