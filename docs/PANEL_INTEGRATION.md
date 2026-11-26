@@ -118,3 +118,41 @@ that support is installed. The other methods refuse until
 
 `agent_version` and `agent_resource_snapshot` also return `protocol_version` (1),
 which the Panel's Update Agent action checks before it sends a release.
+
+## Game servers in Docker (execution backend `docker`)
+
+A GSE game server can run in a container instead of a screen session. It keeps its home,
+`gamefiles` folder, FTP, file manager, ports and startup line. Native stays the default.
+
+Agent setup (per node): run `scripts/gse_container_host.sh all` and
+`scripts/gse_container_host.sh grant-agent <agent user>`, then in `Cfg/Preferences.pm` set
+`container_runtime_enabled => '1'` and `container_allowed_images` (comma-separated image
+prefixes, e.g. `eclipse-temurin:21-jre`). No image is allowed while the list is empty.
+
+RPCs (all return JSON text in the `gse.container.v1` result shape; `result.game_state` on status):
+
+| RPC | Arguments (before the encryption check value) |
+|---|---|
+| `container_game_start` | the 13 `universal_start` arguments, then `runtime_json` |
+| `container_game_stop` | `home_id`, `runtime_json` (`stop_command`, `timeout_seconds`) |
+| `container_game_status` | `home_id`, `runtime_json` (`readiness_port` = container port) |
+| `container_game_command` | `home_id`, `runtime_json`, one console line |
+| `container_game_logs` | `home_id`, `runtime_json`, line count |
+| `container_game_remove` | `home_id`, `runtime_json` (stopped containers only; files stay) |
+
+`runtime_json` = `{contract, target{server_id,home_id,allocation_id,owner_user_id}, payload{image{reference,digest,pull_policy}, resources{cpu_cores,memory_mb,memory_burst_mb?,pids_limit?}, ports{ip,assigned_blocks[],publish[]}, environment{}}, stop_command, timeout_seconds, readiness_port}`.
+
+The agent, not the Panel, decides what is mounted: `<home>/gamefiles` (checked: real path,
+no symlinks, owned by the server user, inside the home) at `/game`, and an agent-owned
+control folder read-only at `/run/gse` (`launch.sh`, `console.in`). The container runs as
+the server's Linux user with all capabilities dropped, no-new-privileges, a read-only root,
+PID/CPU/RAM limits (no swap unless `memory_burst_mb` is set), bounded logs and the
+`gse-games` network (no container-to-container traffic; the host firewall blocks the host
+and private ranges). Restarts: the Panel sends `on-failure:3`, so Docker restarts crashes
+only; a clean or panel stop stays stopped; the native watchdog is set to STOPPED for the
+home; and the agent starts containers marked RUNNING again after an agent or host restart.
+Disk quotas are not enforced (`storage_quota: false`). Native start returns `-18` while a
+container for the home runs, and container start refuses while a native copy runs.
+
+`game_state`: `CREATED`, `STARTING`, `ONLINE`, `STOPPED`, `FAILED`, `OOM`, `UNKNOWN`,
+`RUNTIME_UNAVAILABLE`. A failed RPC never means stopped.
