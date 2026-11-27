@@ -51,6 +51,7 @@ use Sys::Hostname qw(hostname);
 use GameManager;        # start, stop and monitor rules, shared with the Windows agent
 use GameManagerLinux;   # Linux process and port checks for GameManager
 use GSE::Container::Runtime; # opt-in Docker container boundary, shared with the Windows agent
+use GSE::Resource::Inventory qw(collect_linux_inventory); # read-only hardware inventory (Phase 2)
 
 # Compression tools
 use IO::Compress::Bzip2 qw(bzip2 $Bzip2Error); # Used to compress files to bz2.
@@ -1102,6 +1103,7 @@ my $d = Frontier::Daemon::GSP::Forking->new(
 				 mon_stats						=> \&mon_stats,
 				 status_sample						=> \&status_sample,
 				 agent_resource_snapshot			=> \&agent_resource_snapshot,
+				 agent_hardware_inventory			=> \&agent_hardware_inventory,
 				 agent_version					=> \&agent_version,
 				 exec						 	=> \&exec,
 				 clone_home				   		=> \&clone_home,
@@ -7168,6 +7170,23 @@ sub agent_resource_snapshot
 		ram_percent => agent_ram_usage_percent(),
 		disk_percent => agent_disk_usage_percent(),
 		load_average => $load
+	);
+}
+
+sub agent_hardware_inventory
+{
+	return component_update_response(success => 0, status => 'bad_encryption', message => 'Bad Encryption Key')
+		unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
+	my $inventory = eval { collect_linux_inventory(game_path => AGENT_RUN_DIR) };
+	return component_update_response(success => 0, status => 'error', message => 'Hardware inventory failed.') unless($inventory);
+	return component_update_response(
+		success => 1,
+		status => 'ok',
+		message => 'Hardware inventory collected.',
+		agent_version => AGENT_VERSION,
+		protocol_version => AGENT_PROTOCOL_VERSION,
+		inventory_schema => $inventory->{schema_version},
+		inventory_json => JSON::PP->new->canonical->encode($inventory)
 	);
 }
 
