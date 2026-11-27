@@ -180,5 +180,7 @@ block devices. Unknown values are null, never 0. The code is `GSE/Resource/Inven
    when the running agent is new, and `failed` if it cannot get there;
 5. restores the backup and restarts the previous agent if the new agent does not stay up.
 
-The helper is run from the installed copy, so a fix to it protects updates made from the build that contains it.
+The helper is run from the installed copy, so a fix to it protects updates made from the build that contains it. It also replaces itself
+while it runs, so every step is in one function (`main`, called on the last line): bash reads a script as it goes, and without that a
+helper that differs from the one it replaces reads from the wrong place and runs steps twice or stops half way.
 `tests/validate_update_helper_race.sh` runs the helper against a fake agent (see the header of the script for how to run it).
