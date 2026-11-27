@@ -156,3 +156,11 @@ container for the home runs, and container start refuses while a native copy run
 
 `game_state`: `CREATED`, `STARTING`, `ONLINE`, `STOPPED`, `FAILED`, `OOM`, `UNKNOWN`,
 `RUNTIME_UNAVAILABLE`. A failed RPC never means stopped.
+
+## Hardware inventory
+
+`agent_hardware_inventory` returns a read-only description of the machine: CPU model and allowed CPUs, any cgroup CPU
+quota, total and available memory, any cgroup memory limit, whether it is a virtual machine, the game volume and the
+block devices. Unknown values are null, never 0. The code is `GSE/Resource/Inventory.pm` and the tests are
+`tests/inventory_linux_test.pl`. The reply format, the schema and when the panel asks are in the panel repository:
+`docs/agent-hardware-inventory-protocol.md`.
