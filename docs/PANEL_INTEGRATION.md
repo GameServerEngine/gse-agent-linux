@@ -164,3 +164,21 @@ quota, total and available memory, any cgroup memory limit, whether it is a virt
 block devices. Unknown values are null, never 0. The code is `GSE/Resource/Inventory.pm` and the tests are
 `tests/inventory_linux_test.pl`. The reply format, the schema and when the panel asks are in the panel repository:
 `docs/agent-hardware-inventory-protocol.md`.
+
+## Release updates (agent_update_helper.sh)
+
+`agent_self_update` with a release `archive_url`, `checksum` and `version` downloads the archive, checks its SHA-256 and starts
+`agent_update_helper.sh` in the background. The helper:
+
+1. creates `agent_update_hold` and stops the agent. `agent_core_run` waits while that file exists, so nothing starts the
+   agent again while files are replaced. The supervisor itself keeps running: under systemd it is the unit's main process,
+   and ending it would end the unit and the helper with it. A hold older than 15 minutes is ignored;
+2. re-checks the checksum, keeps one backup of the install, and copies the new files in (config and runtime data are kept);
+3. releases the hold and starts the agent (`systemctl start`, or the screen-based start on older installs);
+4. checks that the agent that is running started after the files were copied. A supervisor that predates the hold may have
+   restarted the agent during the copy; that agent runs old code from memory, so the helper restarts it. It reports `ok` only
+   when the running agent is new, and `failed` if it cannot get there;
+5. restores the backup and restarts the previous agent if the new agent does not stay up.
+
+The helper is run from the installed copy, so a fix to it protects updates made from the build that contains it.
+`tests/validate_update_helper_race.sh` runs the helper against a fake agent (see the header of the script for how to run it).
