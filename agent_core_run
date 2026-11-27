@@ -514,6 +514,27 @@ rollback_after_start_failure() {
 	return 1
 }
 
+# The update helper (agent_update_helper.sh) creates this file while it replaces the agent's files. The
+# loop below must not start the agent in that window: it would load a half-replaced install and keep
+# running the old code after the update reports success. This script stays alive and just waits: under
+# systemd it is the unit's main process, and ending it would end the unit and the helper with it.
+UPDATE_HOLD_FILE="${AGENTDIR}/agent_update_hold"
+UPDATE_HOLD_MAX_MINUTES=15
+
+wait_for_update_hold() {
+	[ -e "$UPDATE_HOLD_FILE" ] || return 0
+	log "$(date): update in progress; not starting the agent until the update helper is done"
+	while [ -e "$UPDATE_HOLD_FILE" ]; do
+		# A hold left behind by a helper that died must not keep the agent down for good.
+		if [ -n "$(find "$UPDATE_HOLD_FILE" -mmin "+${UPDATE_HOLD_MAX_MINUTES}" 2>/dev/null)" ]; then
+			log "$(date): ignoring an update hold older than ${UPDATE_HOLD_MAX_MINUTES} minutes"
+			rm -f "$UPDATE_HOLD_FILE"
+			break
+		fi
+		sleep 1
+	done
+}
+
 parse_args "$@"
 prepare_runtime
 validate_config
@@ -542,6 +563,7 @@ cd "$AGENTDIR"
 auto_update_on_restart
 
 while true; do
+	wait_for_update_hold
 	perl "$AGENT" "${agent_args[@]}" &
 	agent_pid=$!
 	wait "$agent_pid" || rc=$?

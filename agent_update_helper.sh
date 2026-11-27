@@ -8,9 +8,14 @@
 #   2. re-checks the SHA-256 of the staged zip,
 #   3. keeps ONE backup of the current install (the install being replaced),
 #   4. copies the new files in, leaving config and runtime data untouched,
-#   5. starts the agent again and waits for it to stay up,
+#   5. starts the agent again, checks that the agent that is running started AFTER the new files were
+#      in place (restarting it if not), and waits for it to stay up,
 #   6. on any failure after the swap starts, restores the backup and restarts
 #      the previous agent, then records the outcome.
+#
+# While the files are replaced the helper holds a file (agent_update_hold) that agent_core_run waits on
+# before it starts the agent. Without it the supervisor restarts a stopped agent ten seconds later, in the
+# middle of the copy, and the "new" agent is really the old code running from memory.
 #
 # Mirrors the Windows agent's agent_update_helper.sh so both agents take the
 # same on-demand archive update from the panel; the only real difference is
@@ -46,6 +51,12 @@ done
 
 BACKUP_DIR="$AGENT_DIR/agent_update_backup"
 STAGE_DIR="$AGENT_DIR/agent_update_stage"
+HOLD_FILE="$AGENT_DIR/agent_update_hold"
+COPIED_AT=0
+# Timings. The defaults are the real ones; the tests shorten them.
+SETTLE_SECONDS="${GSE_UPDATE_SETTLE_SECONDS:-5}"
+POLL_SECONDS="${GSE_UPDATE_POLL_SECONDS:-5}"
+STABLE_SECONDS="${GSE_UPDATE_STABLE_SECONDS:-30}"
 
 log() {
 	mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
@@ -92,6 +103,34 @@ agent_running() {
 	[ -n "$(agent_pids)" ]
 }
 
+# agent_core_run does not start the agent while this file exists. It is only a hold: the supervisor keeps
+# running (under systemd it is the unit's main process, and ending it would end the unit and this helper).
+hold_agent_restarts() {
+	: > "$HOLD_FILE" 2>/dev/null || true
+}
+
+release_agent_restarts() {
+	rm -f "$HOLD_FILE" 2>/dev/null || true
+}
+trap release_agent_restarts EXIT
+
+# True when agent process $1 started before $2 (epoch seconds), the moment the new files were in place.
+started_before() {
+	local pid="$1" cutoff="$2" age start
+	age="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')"
+	[ -n "$age" ] || return 1
+	start=$(( $(date +%s) - age ))
+	[ "$start" -lt "$cutoff" ]
+}
+
+# Agent processes that are still running code loaded before the update finished copying.
+stale_agent_pids() {
+	local pid
+	for pid in $(agent_pids); do
+		started_before "$pid" "$COPIED_AT" && echo "$pid"
+	done
+}
+
 start_agent() {
 	# Installs done by the current installer run the agent as a systemd
 	# service; start it the same way agent_restart does. Fall back to the
@@ -104,14 +143,14 @@ start_agent() {
 }
 
 wait_for_agent_up() {
-	# Agent counts as up once it has stayed alive for 30 seconds.
+	# Agent counts as up once it has stayed alive for 30 seconds (STABLE_SECONDS).
 	local waited=0
 	while [ "$waited" -lt 120 ]; do
-		sleep 5; waited=$((waited + 5))
+		sleep "$POLL_SECONDS"; waited=$((waited + POLL_SECONDS))
 		if [ -n "$(agent_pids)" ]; then
 			local stable=0
-			while [ "$stable" -lt 30 ]; do
-				sleep 5; stable=$((stable + 5))
+			while [ "$stable" -lt "$STABLE_SECONDS" ]; do
+				sleep "$POLL_SECONDS"; stable=$((stable + POLL_SECONDS))
 				[ -n "$(agent_pids)" ] || break
 			done
 			[ -n "$(agent_pids)" ] && return 0
@@ -138,6 +177,7 @@ restore_backup() {
 fail_and_restore() {
 	local message="$1"
 	log "FAILED: $message"
+	release_agent_restarts
 	if restore_backup; then
 		start_agent
 		if wait_for_agent_up; then
@@ -155,8 +195,10 @@ fail_and_restore() {
 log "Helper started for version $VERSION"
 write_state running "Waiting for agent to stop" "" false
 
-# 1. Ask the agent to stop, then wait for it to exit.
-sleep 5
+# 1. Hold the supervisor, ask the agent to stop, then wait for it to exit.
+hold_agent_restarts
+log "Holding agent restarts while the files are replaced"
+sleep "$SETTLE_SECONDS"
 if agent_running; then
 	log "Stopping agent: $(agent_pids | tr '\n' ' ')"
 	for pid in $(agent_pids); do kill -TERM "$pid" 2>/dev/null || true; done
@@ -182,6 +224,7 @@ actual_sha="$(sha256sum "$ZIP" 2>/dev/null | cut -d' ' -f1 | tr 'A-F' 'a-f')"
 if [ "$actual_sha" != "$(printf '%s' "$EXPECTED_SHA" | tr 'A-F' 'a-f')" ]; then
 	log "Checksum mismatch: expected $EXPECTED_SHA got ${actual_sha:-none}"
 	write_state failed "Staged release checksum did not match; nothing was changed" "" false
+	release_agent_restarts
 	start_agent
 	exit 1
 fi
@@ -214,16 +257,35 @@ if [ "$(printf "%s\n" "$top" | grep -c .)" = 1 ] && [ -d "$top" ]; then payload=
 	cp -f "$payload/$rel" "$AGENT_DIR/$rel" || exit 1
 done || fail_and_restore "Copying new files failed"
 printf '%s\n' "$VERSION" > "$AGENT_DIR/release_version.txt.tmp" && mv -f "$AGENT_DIR/release_version.txt.tmp" "$AGENT_DIR/release_version.txt"
+COPIED_AT="$(date +%s)"
 log "New files copied in"
+release_agent_restarts
 write_state running "New files installed; starting agent" "$VERSION" false
 
-# 5. Start the new agent and wait for it to stay up.
+# 5. Start the new agent, make sure the one that is running loaded the new files, and wait for it to stay up.
 start_agent
-if wait_for_agent_up; then
-	log "New agent is running"
-	write_state ok "Agent updated to $VERSION and running" "$VERSION" false
-	rm -rf "$STAGE_DIR"
-	exit 0
-fi
+wait_for_agent_up || fail_and_restore "New agent did not stay running after update"
 
-fail_and_restore "New agent did not stay running after update"
+# A supervisor that predates the hold may have started the agent while the files were still being copied.
+# That agent is running the old code from memory, so it has to be restarted onto the new files.
+rounds=0
+while [ -n "$(stale_agent_pids)" ]; do
+	rounds=$((rounds + 1))
+	if [ "$rounds" -gt 2 ]; then
+		log "The running agent still started before the new files were in place; leaving it running"
+		write_state failed "New files installed, but the running agent started before they were copied in and could not be restarted. Restart the agent." "$VERSION" false
+		rm -rf "$STAGE_DIR"
+		exit 1
+	fi
+	log "Agent started before the new files were in place (pid $(stale_agent_pids | tr '\n' ' ')); restarting it"
+	for pid in $(stale_agent_pids); do kill -TERM "$pid" 2>/dev/null || true; done
+	waited=0
+	while [ -n "$(stale_agent_pids)" ] && [ "$waited" -lt 60 ]; do sleep 2; waited=$((waited + 2)); done
+	start_agent
+	wait_for_agent_up || fail_and_restore "Agent did not come back after being restarted onto the new files"
+done
+
+log "New agent is running"
+write_state ok "Agent updated to $VERSION and running" "$VERSION" false
+rm -rf "$STAGE_DIR"
+exit 0
