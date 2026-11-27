@@ -16,6 +16,8 @@
 #   S3  helper under test with a wrong checksum: nothing may be left held, the agent must come back
 #   S4  a hold left behind by a dead helper is ignored after 15 minutes
 #   S5  a fresh hold keeps the supervisor from restarting the agent, and releasing it restarts the agent
+#   S6  the update ships a different agent_update_helper.sh, so the helper replaces itself while it runs:
+#       every stage must still run exactly once (bash reads a script as it goes)
 #
 # Overrides: HELPER_UNDER_TEST, SUPERVISOR_UNDER_TEST (to run an older copy and watch the old behaviour fail).
 
@@ -24,7 +26,7 @@ set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HELPER="${HELPER_UNDER_TEST:-$REPO/agent_update_helper.sh}"
 NEW_SUPERVISOR="${SUPERVISOR_UNDER_TEST:-$REPO/agent_core_run}"
-ONLY="${ONLY:-S1 S2 S3 S4 S5}"
+ONLY="${ONLY:-S1 S2 S3 S4 S5 S6}"
 PAD_FILES=120
 
 for tool in python3 unzip flock perl ps sha256sum find pgrep setsid timeout; do
@@ -153,13 +155,16 @@ wait_for_starts() {	# dir, count, seconds
 	return 1
 }
 
-make_release() {	# name, dir
+make_release() {	# name, dir, [a helper file to ship, changed so that its lines move]
 	local zip="$TMP/$1/release.zip"
-	python3 - "$zip" "$2" "$NEW_SUPERVISOR" "$PAD_FILES" <<'PY'
-import sys, zipfile
-zip_path, agent_dir, supervisor, pad = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+	python3 - "$zip" "$2" "$NEW_SUPERVISOR" "$PAD_FILES" "${3:-}" <<'PY'
+import os, sys, zipfile
+zip_path, agent_dir, supervisor, pad, helper = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
 top = "gse-agent-linux-testing-9.9.9/"
 with zipfile.ZipFile(zip_path, "w") as z:
+    if helper:
+        src = open(helper).read().split("\n")
+        z.writestr(top + "agent_update_helper.sh", "\n".join([src[0]] + ["# shipped by the test release (line %d)" % i for i in range(1, int(os.environ.get("HELPER_SHIFT_LINES", "15")) + 1)] + src[1:]))
     z.writestr(top + "CODE_VERSION", "v2\n")
     with open(agent_dir + "/agent_core.pl") as f:
         z.writestr(top + "agent_core.pl", f.read())
@@ -171,9 +176,9 @@ PY
 	echo "$zip"
 }
 
-run_helper() {	# dir, zip, sha
+run_helper() {	# dir, zip, sha, [helper to run]
 	( cd "$1" && PATH="$SHIMS:$PATH" GSE_UPDATE_SETTLE_SECONDS=1 GSE_UPDATE_POLL_SECONDS=1 GSE_UPDATE_STABLE_SECONDS=3 \
-		timeout 300 bash "$HELPER" --agent-dir "$1" --zip "$2" --sha256 "$3" --version testing-9.9.9 --agent-pid 0 \
+		timeout 300 bash "${4:-$HELPER}" --agent-dir "$1" --zip "$2" --sha256 "$3" --version testing-9.9.9 --agent-pid 0 \
 		--service-name no_such_unit --state-file "$1/update_state.json" --log-file "$1/update.log" >> "$1/helper.out" 2>&1 )
 }
 
@@ -250,8 +255,32 @@ scenario_hold_blocks_restart() {
 	stop_sandbox "$dir"
 }
 
+scenario_self_replace() {
+	local shift_lines="$1" name="S6/$1" dir zip sha rc stage n
+	echo "--- $name (the shipped helper has $1 extra lines near the top)"
+	dir="$(make_sandbox "S6-$shift_lines" new)"
+	cp "$HELPER" "$dir/agent_update_helper.sh"	# the installed copy: it is the one that runs, and the one that gets replaced
+	start_supervisor "$dir"
+	wait_for_starts "$dir" 1 20; check $? "$name: the fake agent started (v1)"
+	zip="$(HELPER_SHIFT_LINES="$shift_lines" make_release "S6-$shift_lines" "$dir" "$HELPER")"
+	sha="$(sha256sum "$zip" | cut -d' ' -f1)"
+	run_helper "$dir" "$zip" "$sha" "$dir/agent_update_helper.sh"; rc=$?
+	check "$([ "$rc" -eq 0 ] && echo 0 || echo 1)" "$name: the helper finished successfully (exit $rc)"
+	check "$([ "$(state_status "$dir")" = "ok" ] && echo 0 || echo 1)" "$name: the recorded state is ok (is '$(state_status "$dir")')"
+	check "$([ "$(last_code "$dir")" = "v2" ] && echo 0 || echo 1)" "$name: the agent that is running loaded the NEW code (loaded '$(last_code "$dir")')"
+	check "$(grep -q 'shipped by the test release' "$dir/agent_update_helper.sh" && echo 0 || echo 1)" "$name: the installed helper really was replaced by the different one"
+	for stage in "Agent stopped" "Checksum verified" "Backup of current install written" "New files copied in" "New agent is running"; do
+		n="$(grep -c "$stage" "$dir/update.log" 2>/dev/null)"
+		check "$([ "$n" = "1" ] && echo 0 || echo 1)" "$name: the stage '$stage' ran exactly once ($n)"
+	done
+	n="$(grep -c -i -E 'syntax error|unexpected|command not found|No such file or directory|unbound variable' "$dir/helper.out" 2>/dev/null)"
+	check "$([ "$n" = "0" ] && echo 0 || echo 1)" "$name: the helper printed no shell errors ($n)"
+	stop_sandbox "$dir"
+}
+
 for s in $ONLY; do
 	case "$s" in
+		S6) for lines in 5 40 120 250; do scenario_self_replace "$lines"; done ;;
 		S1) scenario_update S1 old ;;
 		S2) scenario_update S2 new ;;
 		S3) scenario_bad_checksum ;;
