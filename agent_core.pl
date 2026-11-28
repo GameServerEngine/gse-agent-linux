@@ -5294,8 +5294,8 @@ sub status_read_cpu_totals
 
 sub status_read_proc_ticks
 {
-	my (%ticks, %name);
-	opendir(my $dh, '/proc') or return (\%ticks, \%name);
+	my (%ticks, %name, %parent);
+	opendir(my $dh, '/proc') or return (\%ticks, \%name, \%parent);
 	foreach my $pid (grep { /^\d+$/ } readdir($dh))
 	{
 		open(my $fh, '<', "/proc/$pid/stat") or next;
@@ -5306,11 +5306,13 @@ sub status_read_proc_ticks
 		my $rest = substr($line, rindex($line, ')') + 2);
 		my @f = split /\s+/, $rest;
 		# Fields after the closing bracket start at field 3 of stat, so utime (14) is index 11 and stime (15) is index 12.
-		$ticks{$pid} = ($f[11] || 0) + ($f[12] || 0);
-		$name{$pid}  = $comm;
+		$ticks{$pid}  = ($f[11] || 0) + ($f[12] || 0);
+		$name{$pid}   = $comm;
+		# ppid is field 4 of stat, index 1 here.
+		$parent{$pid} = ($f[1] || 0) + 0;
 	}
 	closedir($dh);
-	return (\%ticks, \%name);
+	return (\%ticks, \%name, \%parent);
 }
 
 sub status_read_proc_rss
@@ -5361,7 +5363,7 @@ sub status_sample
 	my ($ticks1, $name1) = status_read_proc_ticks();
 	Time::HiRes::usleep(1000000);
 	my ($total2, $idle2, $cores2) = status_read_cpu_totals();
-	my ($ticks2, $name2) = status_read_proc_ticks();
+	my ($ticks2, $name2, $parent2) = status_read_proc_ticks();
 	my $window = $total2 - $total1;
 
 	# Per-process CPU: share of the whole machine over the window.
@@ -5375,8 +5377,13 @@ sub status_sample
 			$cpu_delta{$pid} = $d if $d > 0;
 		}
 	}
-	my @top_cpu = status_top_five(\%cpu_delta, $name2, $window > 0 ? 100 / $window : 0);
-	my @top_ram = status_top_five(status_read_proc_rss(), $name2, 0);
+	my $cpu_scale = $window > 0 ? 100 / $window : 0;
+	my $rss = status_read_proc_rss();
+	my @top_cpu = status_top_five(\%cpu_delta, $name2, $cpu_scale);
+	my @top_ram = status_top_five($rss, $name2, 0);
+	my %containers = status_container_usage(\%cpu_delta, $cpu_scale, $rss, $name2);
+	my @homes = status_home_lines(\%cpu_delta, $cpu_scale, $rss, $parent2, \%containers);
+	my @container_lines = status_container_lines(\%containers);
 
 	my $uptime = 0;
 	if (open(my $fh, '<', '/proc/uptime')) { my $l = <$fh>; close($fh); $uptime = int(($l // '0') =~ /^(\d+)/ ? $1 : 0); }
@@ -5433,7 +5440,131 @@ sub status_sample
 	$out .= "disk_used=$disk_used\n";
 	for my $i (1 .. scalar(@top_cpu)) { $out .= "proc_cpu.$i=$top_cpu[$i - 1]\n"; }
 	for my $i (1 .. scalar(@top_ram)) { $out .= "proc_ram.$i=$top_ram[$i - 1]\n"; }
+	$out .= "$_\n" foreach (@homes, @container_lines);
 	return $out;
+}
+
+# One line per game server with a status file:
+#   home.<id>=<state>|<cpu percent of the machine>|<RAM bytes>|<disk bytes>|<when the disk was measured>
+# CPU and RAM add up the game process and the bot with all their child processes, and the
+# server's own container (gse-h<id>-a<allocation>) when it runs in Docker.
+sub status_home_lines
+{
+	my ($cpu_delta, $cpu_scale, $rss, $parent, $containers) = @_;
+	my %homes = gm_known_homes();
+	my @lines;
+	foreach my $id (sort { $a <=> $b } keys %homes)
+	{
+		next unless (-e "$homes{$id}/status");
+		my $state = gm()->read_state($id);
+		my $bot = gm()->read_state("$id-bot");
+		my @pids = (status_pid_tree($state->{pid}, $rss, $parent), status_pid_tree($bot->{pid}, $rss, $parent));
+		my ($cpu, $ram) = (0, 0);
+		foreach my $pid (@pids)
+		{
+			$cpu += ($cpu_delta->{$pid} || 0) * $cpu_scale;
+			$ram += $rss->{$pid} || 0;
+		}
+		foreach my $c (values %$containers)
+		{
+			next unless (defined $c->{home_id} && $c->{home_id} == $id);
+			$cpu += $c->{cpu};
+			$ram += $c->{ram};
+		}
+		my ($disk, $disk_at) = status_home_disk($homes{$id});
+		push @lines, sprintf("home.%d=%s|%.2f|%d|%s|%s", $id, $state->{state}, $cpu, $ram, $disk, $disk_at);
+	}
+	return @lines;
+}
+
+# A process and all its children, only if the process is running now. Empty for a stopped server.
+sub status_pid_tree
+{
+	my ($root, $rss, $parent) = @_;
+	return () unless (defined $root && $root =~ /^\d+$/ && $root > 0 && exists $parent->{$root});
+	my @tree = ($root);
+	for (my $i = 0; $i < @tree; $i++)
+	{
+		my $pid = $tree[$i];
+		push @tree, grep { $parent->{$_} == $pid && $_ != $pid } keys %$parent;
+	}
+	return @tree;
+}
+
+# Size of a game server folder, from the disk-usage file in it ("<epoch> <bytes>").
+# Measuring a big folder takes a while, so it runs in the background at most once an hour
+# and this returns the last result. Empty values until the first measurement is done.
+sub status_home_disk
+{
+	my ($home_dir) = @_;
+	my $cache = "$home_dir/disk-usage";
+	my ($at, $bytes) = ('', '');
+	if (open(my $fh, '<', $cache))
+	{
+		my $line = <$fh>;
+		close($fh);
+		($at, $bytes) = ($1, $2) if (defined $line && $line =~ /^(\d+) (\d+)/);
+	}
+	my $running = "$cache.running";
+	my $busy = -e $running && (time() - (stat($running))[9]) < 3600;
+	if (!$busy && ($at eq '' || time() - $at >= 3600))
+	{
+		system("touch '$running' && ( b=\$(du -sb '$home_dir' 2>/dev/null | cut -f1); [ -n \"\$b\" ] && echo \"\$(date +%s) \$b\" > '$cache'; rm -f '$running' ) >/dev/null 2>&1 &");
+	}
+	return ($bytes, $at);
+}
+
+# CPU and RAM of every running Docker container, found from each process's cgroup
+# (".../docker-<id>.scope" or ".../docker/<id>"), so it needs no docker command per process.
+# Returns container id => { name, image, cpu, ram, process (the process using the most RAM), home_id }.
+sub status_container_usage
+{
+	my ($cpu_delta, $cpu_scale, $rss, $name) = @_;
+	my %by_id;
+	foreach my $pid (keys %$rss)
+	{
+		open(my $fh, '<', "/proc/$pid/cgroup") or next;
+		my $cgroup = do { local $/; <$fh> };
+		close($fh);
+		next unless (defined $cgroup && $cgroup =~ m{/docker[-/]([0-9a-f]{12,64})(?:\.scope)?\s*$}m);
+		my $c = $by_id{$1} ||= { cpu => 0, ram => 0, top_ram => -1, process => '' };
+		$c->{cpu} += ($cpu_delta->{$pid} || 0) * $cpu_scale;
+		$c->{ram} += $rss->{$pid} || 0;
+		if (($rss->{$pid} || 0) > $c->{top_ram})
+		{
+			$c->{top_ram} = $rss->{$pid} || 0;
+			$c->{process} = defined $name->{$pid} ? $name->{$pid} : '';
+		}
+	}
+	return %by_id unless (%by_id);
+	foreach my $line (`docker ps --no-trunc --format '{{.ID}}|{{.Names}}|{{.Image}}' 2>/dev/null`)
+	{
+		chomp($line);
+		my ($id, $cname, $image) = split(/\|/, $line, 3);
+		next unless (defined $image && $by_id{$id});
+		$by_id{$id}{name} = $cname;
+		$by_id{$id}{image} = $image;
+		$by_id{$id}{home_id} = $1 if ($cname =~ /^gse-h(\d+)-a\d+$/);
+	}
+	return %by_id;
+}
+
+# One line per container that is not a game server's own container:
+#   container.<n>=<name>|<image>|<cpu percent of the machine>|<RAM bytes>|<main process>
+sub status_container_lines
+{
+	my ($containers) = @_;
+	my @lines;
+	my $n = 0;
+	foreach my $id (sort keys %$containers)
+	{
+		my $c = $containers->{$id};
+		next if (defined $c->{home_id});
+		my @text = map { my $v = defined $_ ? $_ : ''; $v =~ s/[|\r\n]//g; substr($v, 0, 60) } ($c->{name} // substr($id, 0, 12), $c->{image}, $c->{process});
+		$n++;
+		push @lines, sprintf("container.%d=%s|%s|%.2f|%d|%s", $n, $text[0], $text[1], $c->{cpu}, $c->{ram}, $text[2]);
+	}
+	return @lines;
 }
 
 ### Return -1 In case of invalid param

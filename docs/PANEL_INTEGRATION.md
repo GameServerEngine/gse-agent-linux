@@ -184,3 +184,26 @@ The helper is run from the installed copy, so a fix to it protects updates made 
 while it runs, so every step is in one function (`main`, called on the last line): bash reads a script as it goes, and without that a
 helper that differs from the one it replaces reads from the wrong place and runs steps twice or stops half way.
 `tests/validate_update_helper_race.sh` runs the helper against a fake agent (see the header of the script for how to run it).
+
+## Status sample: per game server and container usage
+
+`status_sample` (polled by the panel's status history poller) also returns one line per game
+server in the homes index that has a status file, the same as the Windows agent:
+
+    home.<id>=<state>|<cpu>|<ram>|<disk>|<disk_at>
+
+- `cpu`: percent of the whole machine over the one-second window the sample measures.
+- `ram`: bytes of resident memory.
+- CPU and RAM add up the game process and the bot with all their child processes (from the `pid`
+  in `status` and `bot-status`), plus the server's own container `gse-h<id>-a<allocation>`.
+- `disk` and `disk_at`: size of the server folder and when it was measured. It is measured in the
+  background at most once an hour (`du -sb`, result in `<home>/disk-usage`); empty until then.
+
+Docker containers that do not belong to a game server get their own lines, so workloads the panel
+does not manage (such as a test server started by hand) are measured too:
+
+    container.<n>=<name>|<image>|<cpu>|<ram>|<main process>
+
+A process belongs to a container when its cgroup ends in `docker-<id>.scope` or `docker/<id>`.
+Names and images come from `docker ps`; when the agent user cannot run docker, the name is the
+short container id and the image is empty. The main process is the one using the most RAM.
