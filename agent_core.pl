@@ -3306,6 +3306,22 @@ sub set_desired
 
 # Environment variables and pre-start commands from the game config, and the CPU and priority
 # settings, for serverStart.sh. Written at Start, read by every launch (also automatic restarts).
+# Steam game servers (Source games such as CS:Source and Garry's Mod) load the Steam client
+# library from ~/.steam/sdk32 and ~/.steam/sdk64 of the user that runs them, the same links LinuxGSM
+# makes. Without them the server cannot log on to Steam ("dlopen failed ... sdk32/steamclient.so").
+# These lines run as the server's user at each start; a game without the library is left alone.
+sub gm_steamclient_lines
+{
+	my ($game_root) = @_;
+	my $q32 = GameManagerLinux::sh_quote("$game_root/bin/steamclient.so");
+	my $q64 = GameManagerLinux::sh_quote("$game_root/bin/linux64/steamclient.so");
+	return (
+		'gse_home_dir=$(getent passwd "$(id -un)" | cut -d: -f6)',
+		"if [ -r $q32 ]; then mkdir -p \"\$gse_home_dir/.steam/sdk32\" && ln -sfn $q32 \"\$gse_home_dir/.steam/sdk32/steamclient.so\"; fi",
+		"if [ -r $q64 ]; then mkdir -p \"\$gse_home_dir/.steam/sdk64\" && ln -sfn $q64 \"\$gse_home_dir/.steam/sdk64/steamclient.so\"; fi",
+	);
+}
+
 sub gm_write_prestart
 {
 	my ($home_id, $home_path, $game_root, $game_key, $screen_id, $preStart, $envVars, $prefix) = @_;
@@ -3316,6 +3332,7 @@ sub gm_write_prestart
 		push @lines, $line if($line ne "");
 	}
 	push @lines, "GSE_LAUNCH_PREFIX=" . GameManagerLinux::sh_quote($prefix);
+	push @lines, gm_steamclient_lines($game_root);
 	foreach my $line (split /[\r\n]+/, (defined $preStart ? $preStart : ""))
 	{
 		$line = replace_Env_Vars($screen_id, $home_id, $game_root, $line, $game_key);
@@ -5253,12 +5270,19 @@ sub discover_ips
 		return "";
 	}
 
-	# Every IPv4 address of this machine except loopback ("ip" works on every supported
-	# system; the old ifconfig parsing found nothing on current Ubuntu and Debian).
+	# Every IPv4 address players can reach a game on ("ip" works on every supported system; the
+	# old ifconfig parsing found nothing on current Ubuntu and Debian). Loopback and virtual
+	# interfaces are left out: VPN tunnels (WireGuard wg*, tun*, tap*, Tailscale, ZeroTier) and
+	# container or VM bridges (docker*, br-*, veth*, virbr*, lxcbr*, gse*). The panel offers every
+	# address returned here for game servers, so a VPN address here meant games bound to it.
 	my @ips;
 	foreach my $line (`ip -o -4 addr show 2>/dev/null`)
 	{
-		push @ips, $1 if ($line =~ /\sinet\s+(\d+\.\d+\.\d+\.\d+)\// && $1 !~ /^127\./);
+		next unless ($line =~ /^\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+)\//);
+		my ($interface, $ip) = ($1, $2);
+		next if ($ip =~ /^127\./);
+		next if ($interface =~ /^(lo|wg|tun|tap|tailscale|zt|docker|br-|veth|virbr|lxcbr|gse)/);
+		push @ips, $ip;
 	}
 	logger "Found IPs: @ips";
 	return join(",", @ips);

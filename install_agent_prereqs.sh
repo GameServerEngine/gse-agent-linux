@@ -65,7 +65,7 @@ for pkg in "${optional_packages[@]}"; do
 done
 
 echo
-echo "32-bit compatibility packages are useful for some legacy SteamCMD/game-server binaries."
+echo "32-bit compatibility packages are needed by 32-bit SteamCMD and game servers (Source games such as CS:Source)."
 read -r -p "Enable i386 architecture and install 32-bit compatibility packages? [yes]: " install_i386 || install_i386=yes
 install_i386="${install_i386:-yes}"
 if [[ "$install_i386" =~ ^[Yy]([Ee][Ss])?$ ]]; then
@@ -73,7 +73,9 @@ if [[ "$install_i386" =~ ^[Yy]([Ee][Ss])?$ ]]; then
 		dpkg --add-architecture i386
 		apt-get update
 	fi
-	for pkg in libc6-i386 lib32gcc-s1 libgcc-s1:i386; do
+	# lib32stdc++6 and libsdl2-2.0-0:i386 are what LinuxGSM installs for Source servers: without
+	# lib32stdc++6, srcds stops at once with "libstdc++.so.6: cannot open shared object file".
+	for pkg in libc6-i386 lib32gcc-s1 libgcc-s1:i386 lib32stdc++6 libsdl2-2.0-0:i386; do
 		if ! apt-get install -y "$pkg"; then
 			echo "Warning: optional 32-bit package ${pkg} could not be installed."
 		fi
